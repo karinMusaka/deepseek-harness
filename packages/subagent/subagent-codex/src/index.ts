@@ -16,12 +16,27 @@ import {
   type ResolvedSubagentStartRequest,
   type SubagentCapabilities,
   type SubagentProvider,
+  type SubagentResult,
 } from '@deepseek-ai/dsh-subagent'
+import { SENSITIVE_ENV_PATTERN } from '@deepseek-ai/dsh-subprocess'
 import {
   DEFAULT_DISPOSE_GRACE_MS,
   startCodexRun,
   type CodexRunSpec,
 } from './run.ts'
+
+/**
+ * Derive `authMode` purely from the deployment's own `Config.env`: the only
+ * path an API key reaches this child is an explicit credential-shaped entry
+ * here (`scrubbedParentEnv` removes every credential-shaped name from the
+ * inherited parent environment before this layers over it). Never probes
+ * `~/.codex`.
+ * @param env - the resolved `Config.env`.
+ * @returns `'api-key'` when `env` sets a credential-shaped variable name, else `'subscription'`.
+ */
+function resolveAuthMode(env: Record<string, string>): NonNullable<SubagentResult['authMode']> {
+  return Object.keys(env).some(key => SENSITIVE_ENV_PATTERN.test(key)) ? 'api-key' : 'subscription'
+}
 
 export const name = 'subagent-codex'
 export const inject = ['subagents', 'subprocess']
@@ -75,6 +90,7 @@ class CodexProvider implements SubagentProvider {
       // fixed here as `read-only`, never left to the app-server's own config.toml.
       permissionMode: request.permissionMode ?? 'read-only',
       env: this.config.env,
+      authMode: resolveAuthMode(this.config.env),
       disposeGraceMs: this.config.disposeGraceMs,
       spawn: spawnSpec => this.ctx.subprocess.spawn(spawnSpec),
       onError: (error, stopReason) => {

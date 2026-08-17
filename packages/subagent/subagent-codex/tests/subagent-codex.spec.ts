@@ -260,6 +260,19 @@ function turnCompleted(
   }
 }
 
+/** One intermediate `error` notification, matching the app-server's own shape. */
+function errorNotification(
+  error: { message: string; codexErrorInfo: unknown; additionalDetails?: unknown },
+  willRetry: boolean,
+  turnId = 'turn-1',
+  threadId = 'thread-1',
+): JsonObject {
+  return {
+    method: 'error',
+    params: { error, willRetry, threadId, turnId },
+  }
+}
+
 describe('task admission and package contracts', () => {
   it('resolves the fixed app-server command through the Windows npm shim boundary', () => {
     expect(codexAppServerArgv('win32')).toEqual([
@@ -477,6 +490,281 @@ describe('CodexAppServerWire', () => {
     wire.close()
   })
 
+  it('retains the most specific error-notification cause over the terminal turn\'s degraded "other" (measured 401 sequence)', async () => {
+    // Verbatim shape captured against a real unauthenticated app-server
+    // 0.147.0 (see the failure-classification Agent Note): five retryable
+    // `error` notifications carrying `responseStreamDisconnected` with
+    // `httpStatusCode: 401`, then a non-retryable `error` notification AND
+    // the terminal `turn/completed` both degraded to the literal `"other"`.
+    // A naive terminal-only read would classify this as `provider`.
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    const retryable = (attempt: number) => errorNotification({
+      message: `Reconnecting... ${attempt}/5`,
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+      additionalDetails: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, cf-ray: fake-cf-ray, request id: req_fixture',
+    }, true)
+    child.peer.send(
+      retryable(1), retryable(2), retryable(3), retryable(4), retryable(5),
+      errorNotification({
+        message: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, request id: req_fixture',
+        codexErrorInfo: 'other',
+      }, false),
+      turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, request id: req_fixture',
+        codexErrorInfo: 'other',
+      }),
+    )
+    const rejection = await result.then(
+      () => { throw new Error('expected runTurn to reject') },
+      (error: unknown) => error,
+    ) as { failure?: { code: string; message: string } }
+    expect(rejection.failure?.code).toBe('auth')
+    expect(rejection.failure?.message).toContain('401 Unauthorized')
+    wire.close()
+  })
+
+  it('classifies quota from the enumerated causes without hitting a live rate limit', async () => {
+    for (const [codexErrorInfo, label] of [
+      ['usageLimitExceeded', 'usageLimitExceeded'],
+      ['serverOverloaded', 'serverOverloaded'],
+    ] as const) {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: `native ${label} failure`,
+        codexErrorInfo,
+      }))
+      await expect(result).rejects.toMatchObject({ failure: { code: 'quota' } })
+      wire.close()
+    }
+
+    // The object-variant `httpStatusCode: 429` classifies as `quota` even
+    // when the enum label itself does not name a quota cause.
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      errorNotification({
+        message: 'Reconnecting... 1/5',
+        codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 429 } },
+      }, true),
+      turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'unexpected status 429 Too Many Requests',
+        codexErrorInfo: 'other',
+      }),
+    )
+    await expect(result).rejects.toMatchObject({ failure: { code: 'quota' } })
+    wire.close()
+  })
+
+  it('classifies an unrecognized native cause as provider, never crashing on codexErrorInfo\'s open vocabulary', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+      message: 'the model backend returned a 500',
+      codexErrorInfo: 'internalServerError',
+    }))
+    await expect(result).rejects.toMatchObject({ failure: { code: 'provider' } })
+    wire.close()
+  })
+
+  it('classifies from the terminal turn\'s own info when no error notification ever fired', async () => {
+    // A bare `codexErrorInfo: 'unauthorized'` string (not the object variant,
+    // and not degraded to `"other"`) directly on the terminal turn, with no
+    // preceding `error` notification at all.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'no credentials',
+        codexErrorInfo: 'unauthorized',
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('auth')
+      wire.close()
+    }
+
+    // An object-shaped `codexErrorInfo` matching none of the known
+    // HTTP-status variant keys: falls through to `'other'`/`provider`, and a
+    // missing `error` object entirely falls back to the generic message.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'unrecognized shape',
+        codexErrorInfo: { someFutureVariant: {} },
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('provider')
+      wire.close()
+    }
+
+    // `terminal.error` itself absent: the fallback message names the status.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', null))
+      await expect(result).rejects.toThrow('Codex turn ended with status "failed"')
+      wire.close()
+    }
+
+    // An object-variant key matches, but its own value carries no valid
+    // numeric `httpStatusCode` — still falls through to `provider`.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'connection failed, no status yet',
+        codexErrorInfo: { responseStreamDisconnected: {} },
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('provider')
+      wire.close()
+    }
+  })
+
+  it('scopes the error notification to this thread/turn and tolerates a thread-level (turnId: null) notification', async () => {
+    // A foreign threadId is ignored outright.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(errorNotification({
+        message: 'not for this thread',
+        codexErrorInfo: 'unauthorized',
+      }, true, 'turn-1', 'some-other-thread'))
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'native failure',
+        codexErrorInfo: 'internalServerError',
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      // The foreign-thread notification never retained; classification comes
+      // only from the terminal turn's own (unrelated) cause.
+      expect(rejection.failure?.code).toBe('provider')
+      wire.close()
+    }
+
+    // A mismatched turnId is ignored. Waits a tick after `turn/start`'s
+    // response so the turn id is already committed — sending it immediately
+    // would instead race the early-queue path, which treats any early
+    // notification as a claim about the SAME upcoming turn and throws on a
+    // genuine conflict (a different, correctly-covered behavior).
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      await nextTask()
+      child.peer.send(errorNotification({
+        message: 'not for this turn',
+        codexErrorInfo: 'unauthorized',
+      }, true, 'some-other-turn', 'thread-1'))
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'native failure',
+        codexErrorInfo: 'internalServerError',
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('provider')
+      wire.close()
+    }
+
+    // A thread-level notification (`turnId: null`) is not turn-scoped and is
+    // still retained.
+    {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send({
+        method: 'error',
+        params: {
+          error: { message: 'thread-level failure', codexErrorInfo: 'unauthorized' },
+          willRetry: false,
+          threadId: 'thread-1',
+          turnId: null,
+        },
+      })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'degraded to other',
+        codexErrorInfo: 'other',
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('auth')
+      wire.close()
+    }
+
+    // An `error` notification that arrives before `turn/start`'s own response
+    // has committed a turn id (`this.turnCompleted` still undefined) is
+    // silently dropped rather than queued or retained.
+    {
+      const { child, wire } = await initializeWire()
+      child.peer.send(errorNotification({
+        message: 'too early',
+        codexErrorInfo: 'unauthorized',
+      }, true, 'turn-1', 'thread-1'))
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'native failure',
+        codexErrorInfo: 'internalServerError',
+      }))
+      const rejection = await result.then(
+        () => { throw new Error('expected runTurn to reject') },
+        (error: unknown) => error,
+      ) as { failure?: { code: string } }
+      expect(rejection.failure?.code).toBe('provider')
+      wire.close()
+    }
+  })
+
+  it('classifies a JSON-RPC-level deviation as protocol', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    // `turn` is not an object: the same `object()` validator every other
+    // shape check uses.
+    child.peer.send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: 'not-an-object' } })
+    await expect(result).rejects.toMatchObject({ failure: { code: 'protocol' } })
+    wire.close()
+  })
+
   it('rejects invalid handshake, thread, and turn response shapes', async () => {
     {
       const child = fakeChild()
@@ -534,8 +822,11 @@ describe('CodexAppServerWire', () => {
         message: 'unknown agent message phase',
       },
       {
+        // A `failed` terminal turn now throws the classified failure's own
+        // message (the provider's actionable text), not a generic wrapper —
+        // see the failure-classification Agent Note.
         frames: [turnCompleted('failed', 'turn-1', 'thread-1', { message: 'no' })],
-        message: 'status failed',
+        message: 'no',
       },
       {
         frames: [turnCompleted('interrupted')],
@@ -1047,7 +1338,7 @@ describe('run lifecycle and quiescence', () => {
     const run = await starting
     await child.peer.nextMethod('turn/start')
     child.settle({ exitCode: 1, signal: null })
-    await expect(run.result).resolves.toMatchObject({ stopReason: 'error' })
+    await expect(run.result).resolves.toMatchObject({ stopReason: 'error', authMode: 'api-key' })
     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
       env: { OPENAI_API_KEY: 'fake' },
       graceMs: 25,
@@ -1057,6 +1348,41 @@ describe('run lifecycle and quiescence', () => {
       expect.stringContaining('subagent-codex: child run failed (error):'),
     ])
     await run.dispose().catch(() => {})
+    await ctx.fiber.dispose()
+  })
+
+  it('derives auth_mode purely from Config.env, never probing a credential store', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    const child = fakeChild()
+    vi.spyOn(ctx.subprocess, 'spawn').mockReturnValue(child.handle)
+    // No credential-shaped entry anywhere in `Config.env` (an empty env, the
+    // schema default): `authMode` must read `'subscription'`.
+    await ctx.plugin(codex, {})
+    const starting = ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'task' }],
+      parent: fakeParent,
+      signal: new AbortController().signal,
+    })
+    const initialize = await child.peer.nextMethod('initialize')
+    child.peer.respond(initialize, { userAgent: 'codex-cli 0.147.0' })
+    await child.peer.nextMethod('initialized')
+    const threadStart = await child.peer.nextMethod('thread/start')
+    child.peer.respond(threadStart, { thread: { id: 'thread-1', ephemeral: true } })
+    const run = await starting
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.send(
+      { id: turnStart.id, result: { turn: { id: 'turn-1' } } },
+      agentMessage('answer', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      authMode: 'subscription',
+    })
+    await run.dispose()
     await ctx.fiber.dispose()
   })
 })

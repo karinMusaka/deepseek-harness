@@ -125,6 +125,7 @@ interface RealHarness {
 
 async function realHarness(
   script: readonly MessagesBehavior[] | ((workspace: string) => readonly MessagesBehavior[]),
+  options: { readonly omitApiKey?: boolean } = {},
 ): Promise<{
   readonly harness: RealHarness
   readonly fixture: MessagesFixture
@@ -153,7 +154,7 @@ async function realHarness(
   fixtures.push(fixture)
   const env = {
     PATH: `${nativeBin}${delimiter}${process.env.PATH ?? ''}`,
-    ANTHROPIC_API_KEY: fakeKey,
+    ...options.omitApiKey === true ? {} : { ANTHROPIC_API_KEY: fakeKey },
     ANTHROPIC_BASE_URL: fixture.baseUrl,
     CLAUDE_CONFIG_DIR: claudeConfig,
     HOME: root,
@@ -259,6 +260,8 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: sentinel }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `ANTHROPIC_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -314,10 +317,14 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
     await fixture.requestStarted
     expect(harness.handles).toHaveLength(1)
     harness.handles[0]!.terminate()
-    await expect(run.result).resolves.toEqual({
-      output: [],
-      stopReason: 'error',
-    })
+    const result = await run.result
+    expect(result.stopReason).toBe('error')
+    expect(result.output).toEqual([])
+    expect(result.authMode).toBe('api-key')
+    // The real SDK reports a terminal `is_error: true` result (not a stream
+    // rejection) for a killed process, with no `api_error_status` and no
+    // assistant-message cause — classifies as the generic `provider` default.
+    expect(result.failure?.code).toBe('provider')
     await run.dispose()
     expect(fixture.requests).toHaveLength(1)
     expect(fixture.requests[0]!.headers['x-api-key']).toBe(fakeKey)
@@ -337,6 +344,7 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
     await expect(run.result).resolves.toEqual({
       output: [],
       stopReason: 'aborted',
+      authMode: 'api-key',
     })
     await run.dispose()
     await expectQuiescent(harness.handles)
@@ -355,6 +363,7 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'read the probe file' }],
       stopReason: 'completed',
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -375,6 +384,7 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'both attempts were denied' }],
       stopReason: 'completed',
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -397,12 +407,34 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'created the file' }],
       stopReason: 'completed',
+      authMode: 'api-key',
     })
     await run.dispose()
 
     expect(existsSync(join(harness.workspace, 'marker.txt'))).toBe(true)
     expect(readFileSync(join(harness.workspace, 'marker.txt'), 'utf8')).toBe('WROTE')
     expect(fixture.requests).toHaveLength(2)
+    await expectQuiescent(harness.handles)
+  })
+})
+
+describe('real Claude Agent SDK 0.3.220 failure classification', { timeout: 60_000 }, () => {
+  it('classifies a logged-out run as auth, never trusting subtype: "success"', async () => {
+    // Measured against the real CLI with no `ANTHROPIC_API_KEY` at all (empty
+    // `HOME`, no credential store): `is_error: true` while `subtype` stays
+    // `'success'` — see the failure-classification Agent Note. No network
+    // call reaches the fixture at all.
+    const { harness, fixture } = await realHarness([], { omitApiKey: true })
+    const run = await startRequest(harness, 'Say hello.')
+    const result = await run.result
+    await run.dispose()
+
+    expect(result.stopReason).toBe('error')
+    expect(result.failure?.code).toBe('auth')
+    expect(result.failure?.message).toBe('Not logged in · Please run /login')
+    // No credential-shaped entry in `Config.env` (the key was omitted above).
+    expect(result.authMode).toBe('subscription')
+    expect(fixture.requests).toHaveLength(0)
     await expectQuiescent(harness.handles)
   })
 })

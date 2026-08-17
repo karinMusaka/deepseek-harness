@@ -12,6 +12,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   assertPositiveFinite,
   assertUsableCwd,
+  ClassifiedSubagentFailure,
   NO_START_CAPABILITIES,
   resolveChildCwd,
   settleRunResult,
@@ -159,6 +160,97 @@ describe('settleRunResult', () => {
       onAbort,
     })
     expect(result.stopReason).toBe('error')
+  })
+
+  it('preserves a ClassifiedSubagentFailure\'s classification onto the settled result', async () => {
+    const { controller, onAbort } = wiring()
+    const result = await settleRunResult({
+      attempt: async () => {
+        throw new ClassifiedSubagentFailure('Not logged in · Please run /login', {
+          code: 'auth',
+          message: 'Not logged in · Please run /login',
+        })
+      },
+      collectOutput: () => [],
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort,
+    })
+    expect(result).toEqual({
+      output: [],
+      stopReason: 'error',
+      failure: { code: 'auth', message: 'Not logged in · Please run /login' },
+    })
+  })
+
+  it('a plain (unclassified) failure carries no `failure` field', async () => {
+    const { controller, onAbort } = wiring()
+    const result = await settleRunResult({
+      attempt: async () => { throw new Error('unclassified transport failure') },
+      collectOutput: () => [],
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort,
+    })
+    expect(result).not.toHaveProperty('failure')
+  })
+
+  it('attaches authMode to every settled outcome — success, aborted, and error alike', async () => {
+    // Success path.
+    {
+      const { controller, onAbort } = wiring()
+      const result = await settleRunResult({
+        attempt: async () => ({ output: [], stopReason: 'completed' as const }),
+        collectOutput: () => [],
+        cancelled: () => false,
+        signal: controller.signal,
+        onAbort,
+        authMode: 'subscription',
+      })
+      expect(result.authMode).toBe('subscription')
+    }
+
+    // Cancelled path.
+    {
+      const { controller, onAbort } = wiring()
+      const result = await settleRunResult({
+        attempt: async () => ({ output: [], stopReason: 'completed' as const }),
+        collectOutput: () => [],
+        cancelled: () => true,
+        signal: controller.signal,
+        onAbort,
+        authMode: 'api-key',
+      })
+      expect(result).toEqual({ output: [], stopReason: 'aborted', authMode: 'api-key' })
+    }
+
+    // Error path.
+    {
+      const { controller, onAbort } = wiring()
+      const result = await settleRunResult({
+        attempt: async () => { throw new Error('boom') },
+        collectOutput: () => [],
+        cancelled: () => false,
+        signal: controller.signal,
+        onAbort,
+        authMode: 'api-key',
+      })
+      expect(result).toEqual({ output: [], stopReason: 'error', authMode: 'api-key' })
+    }
+
+    // Omitted authMode merges nothing (byte-identical to every result before
+    // this field existed).
+    {
+      const { controller, onAbort } = wiring()
+      const result = await settleRunResult({
+        attempt: async () => ({ output: [], stopReason: 'completed' as const }),
+        collectOutput: () => [],
+        cancelled: () => false,
+        signal: controller.signal,
+        onAbort,
+      })
+      expect(result).not.toHaveProperty('authMode')
+    }
   })
 })
 

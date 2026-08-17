@@ -233,6 +233,33 @@ export interface SubagentStopReasonMap {
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
 /**
+ * Closed vocabulary for WHICH KIND of native product failure ended a run.
+ * Orthogonal to {@link SubagentStopReasonMap}: stop reason answers "why did
+ * the run end" (completed/aborted/error/…), this answers "what kind of
+ * failure was it", and is meaningful only when {@link SubagentResult.stopReason}
+ * is `'error'`. Closed, not merge-extensible — unlike {@link SubagentStopReason},
+ * which a backend may widen, a provider maps its own product-specific error
+ * vocabulary (Codex's `codexErrorInfo`, Claude's `SDKAssistantMessageError`)
+ * onto these four buckets rather than this union growing per provider, so a
+ * consumer switch over it stays exhaustive and MUST close with `assertNever`.
+ */
+export type SubagentFailureCode = 'auth' | 'quota' | 'provider' | 'protocol'
+
+/**
+ * One classified native product failure: a routable {@link SubagentFailureCode}
+ * plus the provider's own actionable diagnostic text. A provider populating
+ * this MUST have already screened `message` is not required here — screening
+ * for credential-shaped text happens once, at the model-facing surface
+ * (`dsh-tool-subagent`), not at every provider that can populate this field.
+ */
+export interface SubagentFailureDetail {
+  /** Routable failure class; switch on this and close the default case with `assertNever`. */
+  readonly code: SubagentFailureCode
+  /** The provider's own actionable diagnostic text (e.g. "Not logged in · Please run /login"). */
+  readonly message: string
+}
+
+/**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 export interface SubagentResult {
@@ -254,6 +281,25 @@ export interface SubagentResult {
   readonly structured?: unknown
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
+  /**
+   * Classified native failure detail. Present only when {@link stopReason} is
+   * `'error'` AND the provider could classify the cause from its own product's
+   * diagnostics; absent on every other stop reason, on success, and on a
+   * provider that has no classification for this failure (the stop reason
+   * alone still reports the run as failed).
+   */
+  readonly failure?: SubagentFailureDetail
+  /**
+   * How the child authenticated with its own product backend: `'api-key'` when
+   * the provider's deployment `Config.env` explicitly sets a credential-shaped
+   * variable, `'subscription'` otherwise — derived purely from that
+   * deployment configuration, never by reading a credential store file
+   * (`~/.claude`, `~/.codex`). Present only for providers that compose a
+   * distinct product identity out of process (`codex`, `claude-code`); absent
+   * for an in-process provider, which shares the harness's own already
+   * -authenticated LLM service and has no separate child identity to report.
+   */
+  readonly authMode?: 'subscription' | 'api-key'
 }
 
 /**

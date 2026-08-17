@@ -8,9 +8,13 @@
 
 `start(request)` 只接受非空的文本块序列，并根据父会话确定子级 cwd。它会创建一个私有 `AbortController`，调用官方 SDK 的 `query()`，并仅在 SDK 的 `spawnClaudeCodeProcess` 钩子已经提供由 [`dsh-subprocess`](../../subprocess/subprocess/README.md) 管理的活动 CLI 句柄后发布此次运行。若在发布前发生失败或取消，它会关闭 query、终止所有已取得的进程树并等待其退出，然后拒绝 `start()` 调用。
 
-SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK 消息流，而且只接受满足以下条件的 `result` 消息：其 `subtype: "success"`、`is_error: false` 且 `result` 非空白，之后迭代器还须正常结束。所有 SDK 错误子类型、标记为错误的成功消息、缺失答案、迭代器失败、协议失败或进程失败都映射为 `error`；该提供方不会产生 `max-tokens` 或 `refusal`。
+SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK 消息流，而且只接受满足以下条件的 `result` 消息：`is_error: false` 且 `result` 非空白，之后迭代器还须正常结束——直接从 `is_error` 分类，绝不依赖 result 消息自身的 `subtype`（真实的登出运行会报告 `is_error: true`，而 `subtype` 仍是 `"success"`；见下文"失败分类"）。任何已分类的错误、缺失答案、迭代器失败、协议失败或进程失败都映射为 `error`；该提供方不会产生 `max-tokens` 或 `refusal`。
 
 本地取消会在结果竞态中胜出并映射为 `aborted`。`dispose()`（资源释放）具有幂等性：它会中止此次运行、请求 SDK query 关闭、调用共享的进程树逐级终止机制，并等待整棵进程树退出。SDK 的优雅关闭只表达协议意图；进程是否完全停稳仍以子进程句柄为准。结果失败与独立的清理失败仍彼此分离。
+
+### 失败分类
+
+`error` 这一 stop reason 会携带一个已分类的 `SubagentResult.failure`（`auth`/`quota`/`provider`/`protocol`，参见 [`dsh-subagent`](../../../docs/subsystems/subagent.md#the-terminal-result-subagentresult)）。本提供方还会消费 `assistant` 消息（此前完全跳过），以保留见到过的最具体 `SDKAssistantMessageError`：`authentication_failed`/`oauth_org_not_allowed` 分类为 `auth`；`rate_limit`/`billing_error`/`overloaded` 分类为 `quota`；其余已命名的值分类为 `provider`；`max_output_tokens` 是单条消息级别的截断提示，不是终态失败信号，不会被保留。在终态结果处，保留下来的原因优先；否则由结果自身的 `api_error_status`（401 → `auth`，429 → `quota`）决定；再否则分类为 `provider`。`protocol` 在这里永远不适用——SDK 完全屏蔽了自己的 wire 传输层。未来某个未识别的 `SDKAssistantMessageError` 值会落到 `provider`，而不是直接失败关闭。`SubagentResult.authMode` 在 `Config.env` 设置了凭据形状的变量名时为 `'api-key'`，否则为 `'subscription'`——纯粹从该配置推导，绝不读取 `~/.claude`。
 
 ## 原生设置与权限范围
 
@@ -78,7 +82,7 @@ Claude Code 子级会在一个全新的 SDK query 中接收独立文本任务。
 
 #### 模型看到的内容
 
-通过 `dsh-tool-subagent`，父级模型只会看到符合严格成功条件的 Claude Code 最终答案，或者在结果未完成时看到消费方给出的原样错误。Claude Code 的推理、工具活动、中间消息、stderr、工作区差异、用量信息和产品标识符均不会复制到父会话。
+通过 `dsh-tool-subagent`，父级模型只会看到符合严格成功条件的 Claude Code 最终答案，或者在结果未完成时看到消费方给出的原样错误。一次已分类的 `error` 会以某个分类专属的标题（例如 "subagent could not authenticate with its provider: …"）加上 Claude Code 自身的可操作文本（例如 `"Not logged in · Please run /login"`，已针对凭据形状的模式做过筛查）到达模型。Claude Code 的推理、工具活动、中间消息、stderr、工作区差异、用量信息和产品标识符均不会复制到父会话。
 
 #### 对 token 的影响
 
@@ -98,3 +102,6 @@ Claude Code 子级会在一个全新的 SDK query 中接收独立文本任务。
 - **仅返回最终文本**：推理、中间消息、工具通信、用量信息、stderr 和工作区差异仍只保留在产品内部。
 - **除 `permissionMode` 外没有可选的共享能力**：对于本提供方，共享服务会拒绝输出 schema、子任务角色设定、工具筛选和 harness 深度强制约束。
 - **没有按实际经过时间触发的超时或副作用回滚**：长时间运行的工作由调用方取消，且取消前已更改的文件或外部系统不会恢复原状。
+- **`protocol` 对本提供方不可达**：SDK 端到端地拥有自己的 wire 传输层，因此那里的形状偏差永远不会作为可分类的原因到达本提供方；一次在任何 result 消息之前发生的流或进程崩溃，只会呈现为一个未分类的 `error`。
+- **失败分类是针对外部开放词汇表的尽力而为**：`SDKAssistantMessageError` 可能在未来的 SDK 版本中扩充；未识别的值会分类为 `provider` 而不是直接失败关闭。
+- **`authMode` 报告的是配置，而非实时账户状态**：它从不探测 `~/.claude`，因此如果部署方设置了一个凭据形状的 `env` 条目但子进程实际并未使用它（或反之），报告的是配置的意图，而不是关于某次运行实际使用了哪个凭据的已验证事实。

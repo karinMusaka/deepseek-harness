@@ -56,6 +56,9 @@ const SUBAGENT_CONTINUABLE_INHERITANCE_CONFIG = fileURLToPath(
   new URL('../subagent-continuable-inheritance.cordis.yml', import.meta.url),
 )
 const SUBAGENT_TIMEOUT_CONFIG = fileURLToPath(new URL('../subagent-timeout.cordis.yml', import.meta.url))
+const SUBAGENT_CLASSIFIED_FAILURE_CONFIG = fileURLToPath(
+  new URL('../subagent-classified-failure.cordis.yml', import.meta.url),
+)
 const LSP_CONFIG = fileURLToPath(new URL('./lsp.cordis.yml', import.meta.url))
 const WEB_CONFIG = fileURLToPath(new URL('../web.cordis.yml', import.meta.url))
 const FS_SEARCH_CONFIG = fileURLToPath(new URL('./fs-search.cordis.yml', import.meta.url))
@@ -386,6 +389,17 @@ const SCENARIOS: Scenario[] = [
   // usage-only assistant/message after earlier text and a tool call. The
   // parent's tool result must retain that assistant output and stop reason.
   { name: 'subagent-max-tokens-partial', hasModelTurn: true, recorded: false },
+  // Keyless authored scenario: a snapshot-only injector (never a change to
+  // any product package) replaces the real forked child's settled result
+  // with a classified `auth` failure, pinning the exact model-visible text
+  // `dsh-tool-subagent` now produces for a classified native failure — see
+  // the failure-classification Agent Note.
+  {
+    name: 'subagent-classified-failure',
+    hasModelTurn: true,
+    recorded: false,
+    configPath: SUBAGENT_CLASSIFIED_FAILURE_CONFIG,
+  },
   { name: 'subagent-multi', hasModelTurn: true, recorded: true },
   // Authored keyless replay: one assistant message carries two subagent calls
   // and the parent log pins call/call/result/result instead of the serial

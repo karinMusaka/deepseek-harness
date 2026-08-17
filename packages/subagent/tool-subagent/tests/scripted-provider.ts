@@ -5,6 +5,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   SubagentCapabilities,
+  SubagentFailureDetail,
   SubagentProvider,
   SubagentResult,
   SubagentRun,
@@ -34,6 +35,10 @@ export interface Config {
   inheritsParentContext?: boolean
   /** Structured value returned when the request asks for one. */
   structured?: unknown
+  /** Classified failure detail attached to the result (only meaningful with `stopReason: 'error'`). */
+  failure?: SubagentFailureDetail
+  /** `authMode` attached to the result. */
+  authMode?: SubagentResult['authMode']
   /** Observes each start; the child's result additionally waits for the returned promise. */
   onStart?: (request: SubagentStartRequest) => Promise<void> | void
 }
@@ -70,6 +75,8 @@ class ScriptedSubagentProvider implements SubagentProvider {
       output,
       ...wantsStructured ? { structured: this.config.structured ?? { reply } } : {},
       stopReason: state.cancelled ? 'aborted' : stopReason,
+      ...!state.cancelled && this.config.failure !== undefined ? { failure: this.config.failure } : {},
+      ...this.config.authMode !== undefined ? { authMode: this.config.authMode } : {},
     })
     const gate = Promise.resolve(this.config.onStart?.(request))
     const result = gate.then(() => new Promise<SubagentResult>((resolve) => {

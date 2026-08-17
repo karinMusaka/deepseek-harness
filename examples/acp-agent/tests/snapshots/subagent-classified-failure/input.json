@@ -1,0 +1,14 @@
+{
+  "steps": [
+    {
+      "op": "initialize"
+    },
+    {
+      "op": "newSession"
+    },
+    {
+      "op": "prompt",
+      "text": "Use the subagent tool exactly once to delegate this subtask: \"Say hello.\" After the subagent returns, reply with the single word PARENT_DONE and stop."
+    }
+  ]
+}

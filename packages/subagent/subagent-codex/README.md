@@ -14,6 +14,10 @@ For command and file approvals, the unattended provider selects a non-approval d
 
 Local cancellation wins the result race and maps to `aborted`. A failed turn whose `codexErrorInfo` is `contextWindowExceeded` maps to `max-tokens`; every other remote interrupted or failed turn maps to `error`, and the provider produces no `refusal`. `dispose()` is idempotent: it requests a best-effort `turn/interrupt` with both current ids when they are known, closes the JSON-RPC wire, ends stdin, invokes the shared process-tree termination escalation, and waits for whole-tree exit. Result failure and independent teardown failure remain separate.
 
+### Failure classification
+
+An `error` stop reason carries a classified `SubagentResult.failure` (`auth`/`quota`/`provider`/`protocol`, see [`dsh-subagent`](../../../docs/subsystems/subagent.md#the-terminal-result-subagentresult)) whenever the wire can classify the cause. The app-server's own intermediate `error` notifications — which `turn/completed` does not repeat — carry the useful structured cause; a real unauthenticated run degrades the terminal turn's own `codexErrorInfo` to the literal `"other"`, so this provider retains the most specific cause seen across the turn's `error` notifications instead of trusting the terminal one alone (measured; see the [failure-classification Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-failure-classification.md)). `httpStatusCode === 401` or `codexErrorInfo === 'unauthorized'` classifies `auth`; `httpStatusCode === 429` or `'usageLimitExceeded'`/`'serverOverloaded'` classifies `quota`; any other native cause classifies `provider`; a JSON-RPC shape deviation this wire's own validators reject classifies `protocol`. An unrecognized future `codexErrorInfo` value falls through to `provider` rather than failing closed. `SubagentResult.authMode` is `'api-key'` when `Config.env` sets a credential-shaped variable name, `'subscription'` otherwise — derived purely from that configuration, never by reading `~/.codex`.
+
 ## Capabilities and context
 
 The provider advertises the `permissionMode` start-time capability (`sandbox` on `thread/start`, above) and no other optional capability; it reports `inheritsParentContext: false`. Codex receives the standalone text task, the parent Session cwd, and the fixed permission scope, but not the parent conversation, persona, tool filter, depth policy, or structured-output contract. The ephemeral Codex thread id and turn id stay private to this run and are never persisted in the parent Session.
@@ -70,7 +74,7 @@ Independent of the parent request cache. Reuse depends only on Codex's own provi
 
 #### What the model sees
 
-Through `dsh-tool-subagent`, the parent sees only the selected final Codex answer or the consumer's exact error for a non-completed result. Codex commentary, reasoning, tool activity, stderr, workspace diffs, and product ids are not copied into the parent Session.
+Through `dsh-tool-subagent`, the parent sees only the selected final Codex answer or the consumer's exact error for a non-completed result. A classified `error` reaches the model as a class-specific headline (e.g. "subagent could not authenticate with its provider: …") plus Codex's own actionable text, screened for credential-shaped patterns. Codex commentary, reasoning, tool activity, stderr, workspace diffs, and product ids are not copied into the parent Session.
 
 #### Token effect
 
@@ -89,3 +93,5 @@ Append-only: the new tool result follows the reusable parent request prefix.
 - **Final text only** — reasoning, commentary, intermediate messages, tool traffic, usage, stderr, and workspace diffs remain product-local.
 - **No optional shared capability besides `permissionMode`** — output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
 - **No wall-clock timeout or side-effect rollback** — the caller cancels long work, and files or external systems changed before cancellation are not restored.
+- **Failure classification is best-effort against an external, open vocabulary** — `codexErrorInfo`'s enum may grow in a future app-server release; an unrecognized value classifies as `provider` rather than failing closed, so a new native cause is never misreported as `auth`/`quota` but may initially classify more coarsely than a later update of this package would.
+- **`authMode` reports configuration, not live account state** — it never probes `~/.codex`, so a deployment that sets a credential-shaped `env` entry the child never actually uses (or vice versa) reports the configured intent, not a verified fact about which credential the child used for a given run.

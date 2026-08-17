@@ -162,6 +162,8 @@ describe('real @openai/codex 0.147.0 product', () => {
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: sentinel }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -220,6 +222,8 @@ describe('real @openai/codex 0.147.0 product', () => {
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: acknowledgement }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -281,6 +285,35 @@ describe('real @openai/codex 0.147.0 product', () => {
   }, 60_000)
 })
 
+describe('real @openai/codex 0.147.0 failure classification', () => {
+  it('classifies a real 401 as auth from the error-notification stream, not the terminal turn\'s degraded "other"', async () => {
+    // The real app-server retries the Responses stream five times against a
+    // persistent 401 (codex-core's own reconnect ladder — see the
+    // failure-classification Agent Note), then gives up: the terminal
+    // `turn/completed` reports `codexErrorInfo: "other"`. A naive
+    // terminal-only classifier would report `provider`, never `auth`.
+    const { harness, fixture } = await realHarness([{ kind: 'unauthorized' }])
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Say hello.' }],
+      parent: harness.parent,
+      signal: new AbortController().signal,
+    })
+    const result = await run.result
+    await run.dispose()
+
+    expect(result.stopReason).toBe('error')
+    expect(result.failure?.code).toBe('auth')
+    // The provider's own actionable text reaches the result verbatim
+    // (redaction happens once, later, at `dsh-tool-subagent`).
+    expect(result.failure?.message).toContain('401 Unauthorized')
+    expect(result.failure?.message).toContain('Missing bearer or basic authentication in header')
+    // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+    expect(result.authMode).toBe('api-key')
+    expect(fixture.requests.length).toBeGreaterThanOrEqual(2)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+})
+
 /** Shell/exec function-call choices real codex advertises for a plain (non-escalated) command. */
 function shellCallChoices(command: string): readonly { name: string; arguments: Record<string, unknown> }[] {
   return [
@@ -306,6 +339,8 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'read the probe file' }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -331,6 +366,8 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'attempted the write' }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 
@@ -360,6 +397,8 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
     await expect(run.result).resolves.toEqual({
       output: [{ type: 'text', text: 'created the file' }],
       stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
     })
     await run.dispose()
 

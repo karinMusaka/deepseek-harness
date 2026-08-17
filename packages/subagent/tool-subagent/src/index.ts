@@ -12,11 +12,20 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
+import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { assertPositiveFinite, assertSubagentMaxDepth, settleRun } from '@deepseek-ai/dsh-subagent'
-import type { SubagentPermissionMode, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import { assertPositiveFinite, assertSubagentMaxDepth, SubagentError, settleRun } from '@deepseek-ai/dsh-subagent'
+import type {
+  SubagentFailureCode,
+  SubagentFailureDetail,
+  SubagentPermissionMode,
+  SubagentProvider,
+  SubagentResult,
+  SubagentRun,
+} from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import { SENSITIVE_ENV_PATTERN } from '@deepseek-ai/dsh-subprocess'
 import { deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
@@ -30,12 +39,85 @@ const SUBAGENT_TIMEOUT_CODE = 'SUBAGENT_TIMEOUT'
 /**
  * Model-facing headline for a run this tool's own timer stopped, phrased from
  * the model's perspective (no timer/signal/abort vocabulary) and mirroring
- * the sibling `max-tokens` headline in {@link stopReasonError}.
+ * the sibling `max-tokens` headline in {@link stopReasonFailure}.
  * @param timeoutMs - the elapsed timer bound, in milliseconds.
  * @returns the stop-reason headline naming the configured limit in seconds.
  */
 function timeoutHeadline(timeoutMs: number): string {
   return `subagent run hit its ${timeoutMs / 1000}s time limit before finishing`
+}
+
+/**
+ * A label immediately followed by a `:` or `=` and a value, where the label
+ * contains one of `scrubbedParentEnv`'s own credential-shaped substrings
+ * (`KEY`/`PASSWORD`/`SECRET`/`TOKEN`, case-insensitive — {@link SENSITIVE_ENV_PATTERN}).
+ * Matches the same vocabulary that keeps a real credential out of a spawned
+ * child's environment, applied here to free-form provider diagnostic text
+ * instead of an environment variable name.
+ */
+const CREDENTIAL_SHAPED_PAIR = new RegExp(
+  String.raw`([\w-]*(?:${SENSITIVE_ENV_PATTERN.source})[\w-]*)(\s*[:=]\s*)(['"]?)([^\s,'"]+)\3`,
+  'gi',
+)
+
+/**
+ * Screen provider diagnostic text for a credential-shaped label/value pair
+ * before it reaches model-visible output (and, through it, the session log).
+ * This PR is the first to route native provider text into that log — see the
+ * Agent Note. Redacts only the value half of a matched pair; the label and
+ * surrounding text (including non-secret operational identifiers a real
+ * provider message may carry, e.g. a request id) survive unchanged.
+ * @param text - the provider's own diagnostic text.
+ * @returns `text` with every credential-shaped value replaced by `[REDACTED]`.
+ */
+export function redactCredentialShapedText(text: string): string {
+  return text.replace(CREDENTIAL_SHAPED_PAIR, (_match, label: string, separator: string, quote: string) =>
+    `${label}${separator}${quote}[REDACTED]${quote}`)
+}
+
+/** Model-facing noun phrase plus the routable {@link SubagentError} code for one failure class. */
+interface FailureClassPresentation {
+  readonly noun: string
+  readonly code: string
+}
+
+/**
+ * Present one classified {@link SubagentFailureCode}. Closed union: every
+ * variant is enumerated and the default falls through to `assertNever`, so an
+ * unhandled future addition fails compilation at this switch, not silently at
+ * runtime.
+ * @param code - the classified failure code.
+ * @returns the model-facing noun phrase and the code {@link SubagentError} carries.
+ */
+function failureClassPresentation(code: SubagentFailureCode): FailureClassPresentation {
+  switch (code) {
+    case 'auth':
+      return { noun: 'subagent could not authenticate with its provider', code: 'SUBAGENT_AUTH' }
+    case 'quota':
+      return { noun: 'subagent hit its provider\'s usage limit', code: 'SUBAGENT_QUOTA' }
+    case 'provider':
+      return { noun: 'subagent\'s provider failed', code: 'SUBAGENT_PROVIDER' }
+    case 'protocol':
+      return { noun: 'subagent\'s provider violated its own protocol', code: 'SUBAGENT_PROTOCOL' }
+    /* v8 ignore next 2 -- closed-union exhaustiveness guard */
+    default:
+      return assertNever(code, 'failureClassPresentation')
+  }
+}
+
+/**
+ * Render one classified native failure as model-facing text: the failure
+ * class noun plus the provider's own actionable text, screened for
+ * credential-shaped patterns.
+ * @param failure - the settled result's classified failure detail.
+ * @returns the headline text and the routable {@link SubagentError} code.
+ */
+function classifiedFailureHeadline(failure: SubagentFailureDetail): { headline: string; code: string } {
+  const presentation = failureClassPresentation(failure.code)
+  return {
+    headline: `${presentation.noun}: ${redactCredentialShapedText(failure.message)}`,
+    code: presentation.code,
+  }
 }
 
 export const name = 'tool-subagent'
@@ -173,6 +255,13 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
   }
 }
 
+/** One non-`completed` stop reason's model-facing headline and, when classified, its routable code. */
+interface StopReasonFailure {
+  readonly headline: string
+  /** Present only for a classified native failure (`result.failure`); routes through {@link SubagentError}. */
+  readonly code?: string
+}
+
 /**
  * A non-`completed` stop reason means the child did not finish cleanly.
  * @param result - the child's terminal result.
@@ -183,24 +272,29 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
  *   caller; every other `aborted` result — including a caller cancellation
  *   racing an armed timer — reports as cancelled.
  */
-function stopReasonError(result: SubagentResult, deadlineSignal: AbortSignal): string | undefined {
+function stopReasonFailure(result: SubagentResult, deadlineSignal: AbortSignal): StopReasonFailure | undefined {
   switch (result.stopReason) {
     case 'completed':
       return undefined
     case 'aborted': {
       const timedOut = timeoutOf(deadlineSignal, SUBAGENT_TIMEOUT_CODE)
-      return timedOut !== undefined ? timeoutHeadline(timedOut.timeoutMs) : 'subagent run was cancelled'
+      return { headline: timedOut !== undefined ? timeoutHeadline(timedOut.timeoutMs) : 'subagent run was cancelled' }
     }
     case 'error':
-      return 'subagent run failed'
+      // `result.failure` is absent when the provider could not classify the
+      // cause (e.g. a plain transport failure) — keep the prior unclassified
+      // headline and no routable code for that case.
+      return result.failure === undefined
+        ? { headline: 'subagent run failed' }
+        : classifiedFailureHeadline(result.failure)
     case 'max-tokens':
-      return 'subagent run hit its token limit before finishing'
+      return { headline: 'subagent run hit its token limit before finishing' }
     case 'refusal':
-      return 'subagent declined the task'
+      return { headline: 'subagent declined the task' }
     // Merge-extensible union: a backend may add stop reasons. Treat an unknown
     // terminal reason as a failure rather than reporting partial output as success.
     default:
-      return `subagent run ended abnormally (${String(result.stopReason)})`
+      return { headline: `subagent run ended abnormally (${String(result.stopReason)})` }
   }
 }
 
@@ -230,17 +324,22 @@ type ForegroundToolResult = {
  * independent result failure.
  * @param run - the published run to await and dispose.
  * @param deadlineSignal - this call's composed signal, forwarded to
- *   {@link stopReasonError} so a timeout reports distinctly from a caller
+ *   {@link stopReasonFailure} so a timeout reports distinctly from a caller
  *   cancellation.
  */
 async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal): Promise<ForegroundToolResult> {
   const [execution] = await Promise.allSettled([
     run.result.then((result): ForegroundToolResult => {
-      const error = stopReasonError(result, deadlineSignal)
-      if (error !== undefined) {
+      const failure = stopReasonFailure(result, deadlineSignal)
+      if (failure !== undefined) {
         // The registry converts this throw to isError; partial output is not
         // success, but the preserved partial answer still reaches the parent.
-        throw new Error(withPartialText(error, result.output))
+        // A classified native failure raises `SubagentError` so its routable
+        // `code` reaches `ToolExecutionResult.error.info` (the existing
+        // structured-error-taxonomy path); an unclassified stop reason keeps
+        // the prior plain `Error`.
+        const message = withPartialText(failure.headline, result.output)
+        throw failure.code !== undefined ? new SubagentError(message, failure.code) : new Error(message)
       }
       return {
         kind: 'foreground',

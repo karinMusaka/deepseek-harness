@@ -56,6 +56,13 @@ export interface CodexRunSpec {
   readonly permissionMode: SubagentPermissionMode
   /** Explicit deployment/test environment layered after the shared scrub. */
   readonly env: Record<string, string>
+  /**
+   * How this child authenticates, derived purely from {@link env} by the
+   * provider (`Config.env` setting a credential-shaped variable name means
+   * `'api-key'`) — never by reading `~/.codex`. Attached to every settled
+   * result.
+   */
+  readonly authMode?: SubagentResult['authMode']
   /** Subprocess termination grace passed to the shared process-tree owner. */
   readonly disposeGraceMs: number
   /** Shared subprocess service spawn operation. */
@@ -196,6 +203,7 @@ export async function startCodexRun(
     onError: spec.onError,
     signal: request.signal,
     onAbort,
+    authMode: spec.authMode,
   })
 
   return subprocessRunHandle({

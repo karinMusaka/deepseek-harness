@@ -4106,6 +4106,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SubagentDescriptorData = OneShotSubagentDescriptorData | ContinuableSubagentDescriptorData;',
   },
   {
+    name: 'SubagentFailureCode',
+    declaration: 'export type SubagentFailureCode = \'auth\' | \'quota\' | \'provider\' | \'protocol\';',
+  },
+  {
+    name: 'SubagentFailureDetail',
+    declaration: 'export interface SubagentFailureDetail {\n    readonly code: SubagentFailureCode;\n    readonly message: string;\n}',
+  },
+  {
     name: 'SubagentFollowupOptions',
     declaration: 'export interface SubagentFollowupOptions {\n    readonly source: MessageSource;\n    readonly signal: AbortSignal;\n}',
   },
@@ -4131,7 +4139,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentResult',
-    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n}',
+    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n    readonly failure?: SubagentFailureDetail;\n    readonly authMode?: \'subscription\' | \'api-key\';\n}',
   },
   {
     name: 'SubagentRun',

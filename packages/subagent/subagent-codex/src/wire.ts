@@ -10,7 +10,8 @@
 import type { Readable, Writable } from 'node:stream'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-llm'
-import type { SubagentPermissionMode, SubagentResult } from '@deepseek-ai/dsh-subagent'
+import { ClassifiedSubagentFailure } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailureCode, SubagentPermissionMode, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 
 /**
@@ -33,16 +34,26 @@ function codexSandbox(permissionMode: SubagentPermissionMode): 'read-only' | 'wo
 
 type JsonObject = Record<string, unknown>
 
+/**
+ * A JSON-RPC-level deviation from the app-server's own documented shapes
+ * (this validator's very purpose). Every throw here is classified `protocol`
+ * — the spec's own definition of the class — so a mid-turn shape violation
+ * settles as a routable `SubagentResult.failure` instead of an unclassified
+ * `'error'` stop reason.
+ */
 function object(value: unknown, label: string): JsonObject {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`subagent-codex: app-server returned invalid ${label}`)
+    const message = `subagent-codex: app-server returned invalid ${label}`
+    throw new ClassifiedSubagentFailure(message, { code: 'protocol', message })
   }
   return value as JsonObject
 }
 
+/** See {@link object}: the same protocol-deviation classification for a required string field. */
 function string(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`subagent-codex: app-server returned invalid ${label}`)
+    const message = `subagent-codex: app-server returned invalid ${label}`
+    throw new ClassifiedSubagentFailure(message, { code: 'protocol', message })
   }
   return value
 }
@@ -64,6 +75,71 @@ function isContextWindowExceeded(turn: JsonObject): boolean {
     && typeof error === 'object'
     && !Array.isArray(error)
     && (error as JsonObject).codexErrorInfo === 'contextWindowExceeded'
+}
+
+/**
+ * `codexErrorInfo` object variants that carry an HTTP status
+ * (`rust-v0.147.0`): `httpConnectionFailed`, `responseStreamConnectionFailed`,
+ * `responseStreamDisconnected`, `responseTooManyFailedAttempts`.
+ */
+const HTTP_STATUS_VARIANT_KEYS = [
+  'httpConnectionFailed',
+  'responseStreamConnectionFailed',
+  'responseStreamDisconnected',
+  'responseTooManyFailedAttempts',
+] as const
+
+/**
+ * The comparable label for "most specific cause seen": the literal enum
+ * string (`unauthorized`, `usageLimitExceeded`, `other`, …) as-is, or the
+ * matching {@link HTTP_STATUS_VARIANT_KEYS} name for an object variant, or
+ * `'other'` for an unrecognized shape. `codexErrorInfo`'s vocabulary is
+ * external and open (the app-server may add values in a later release);
+ * unrecognized labels fall through to `'other'`'s classification rather than
+ * failing loud, so a version bump degrades gracefully instead of crashing.
+ */
+function codexErrorInfoLabel(info: unknown): string {
+  if (typeof info === 'string') return info
+  if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+    const record = info as JsonObject
+    for (const key of HTTP_STATUS_VARIANT_KEYS) {
+      if (key in record) return key
+    }
+  }
+  return 'other'
+}
+
+/** Extract the HTTP status from an object-variant `codexErrorInfo`, if any. */
+function codexHttpStatusCode(info: unknown): number | undefined {
+  if (info === null || typeof info !== 'object' || Array.isArray(info)) return undefined
+  const record = info as JsonObject
+  for (const key of HTTP_STATUS_VARIANT_KEYS) {
+    const variant = record[key]
+    if (variant !== null && typeof variant === 'object' && !Array.isArray(variant)) {
+      const status = (variant as JsonObject).httpStatusCode
+      if (typeof status === 'number') return status
+    }
+  }
+  return undefined
+}
+
+/**
+ * Map a codex-native cause to the seam's closed failure vocabulary (measured
+ * table; see the
+ * [Agent Note](../../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-failure-classification.md)).
+ * `codexErrorInfo`'s enum is external and open, so an unrecognized label
+ * falls through to `'provider'` — never `assertNever`, which is reserved for
+ * this module's own closed {@link SubagentFailureCode} switches.
+ * @param label - {@link codexErrorInfoLabel}'s comparable cause label.
+ * @param httpStatusCode - the HTTP status from an object-variant cause, if any.
+ * @returns the classified failure code.
+ */
+function classifyCodexFailure(label: string, httpStatusCode: number | undefined): SubagentFailureCode {
+  if (httpStatusCode === 401) return 'auth'
+  if (httpStatusCode === 429) return 'quota'
+  if (label === 'unauthorized') return 'auth'
+  if (label === 'usageLimitExceeded' || label === 'serverOverloaded') return 'quota'
+  return 'provider'
 }
 
 function thrown(value: unknown): Error {
@@ -113,6 +189,17 @@ export class CodexAppServerWire {
   private lastFinalAnswer: string | undefined
   private lastUnphasedAnswer: string | undefined
   private closed = false
+  /**
+   * Most specific cause retained across the active turn's `error`
+   * notifications. The terminal `turn/completed` degrades a retryable 401 to
+   * the literal `codexErrorInfo: "other"` (measured against real
+   * unauthenticated app-server 0.147.0) — retaining the cause here, from the
+   * intermediate notifications `handleNotification` does not otherwise
+   * observe, is the only way to classify that turn as `auth` instead of
+   * `provider`.
+   */
+  private retainedErrorLabel: string | undefined
+  private retainedHttpStatusCode: number | undefined
 
   constructor(
     private readonly input: Readable,
@@ -217,10 +304,8 @@ export class CodexAppServerWire {
       return { output: this.collectOutput(), stopReason: 'max-tokens' }
     }
     if (status !== 'completed') {
-      const detail = status === 'failed'
-        ? `: ${JSON.stringify(terminal.error)}`
-        : ''
-      throw new Error(`subagent-codex: Codex turn ended with status ${String(status)}${detail}`)
+      if (status === 'failed') throw this.classifiedTurnFailure(terminal)
+      throw new Error(`subagent-codex: Codex turn ended with status ${String(status)}`)
     }
     const output = this.collectOutput()
     if (output.length === 0) {
@@ -317,6 +402,45 @@ export class CodexAppServerWire {
     }
   }
 
+  /**
+   * Build the classified failure for a `failed` terminal turn. Prefers
+   * {@link retainedErrorLabel}/{@link retainedHttpStatusCode} — the most
+   * specific cause seen across the turn's intermediate `error` notifications
+   * — over the terminal turn's own `codexErrorInfo`, which degrades a
+   * retryable 401 to the literal `"other"` (measured; see the Agent Note).
+   * Falls back to the terminal turn's own info only when no `error`
+   * notification was observed for this turn at all.
+   */
+  private classifiedTurnFailure(terminal: JsonObject): ClassifiedSubagentFailure {
+    const error = terminal.error !== null && typeof terminal.error === 'object' && !Array.isArray(terminal.error)
+      ? terminal.error as JsonObject
+      : {}
+    const message = typeof error.message === 'string' && error.message.length > 0
+      ? error.message
+      : 'subagent-codex: Codex turn ended with status "failed"'
+    const label = this.retainedErrorLabel ?? codexErrorInfoLabel(error.codexErrorInfo)
+    const httpStatusCode = this.retainedErrorLabel !== undefined
+      ? this.retainedHttpStatusCode
+      : codexHttpStatusCode(error.codexErrorInfo)
+    return new ClassifiedSubagentFailure(message, { code: classifyCodexFailure(label, httpStatusCode), message })
+  }
+
+  /**
+   * Retain the most specific native cause across possibly several `error`
+   * notifications for the active turn: once a label other than `'other'` is
+   * retained, a later `'other'` (the terminal degradation's own preceding
+   * `error` notification, `willRetry: false`) never overwrites it.
+   */
+  private observeErrorNotification(params: JsonObject): void {
+    const error = object(params.error, 'error notification error')
+    const info = error.codexErrorInfo
+    const label = codexErrorInfoLabel(info)
+    if (label !== 'other' || this.retainedErrorLabel === undefined) {
+      this.retainedErrorLabel = label
+      this.retainedHttpStatusCode = codexHttpStatusCode(info)
+    }
+  }
+
   private handleServerRequest(method: string, params: JsonObject): Promise<unknown> {
     try {
       switch (method) {
@@ -377,6 +501,23 @@ export class CodexAppServerWire {
       } else if (item.phase !== 'commentary') {
         throw new Error(`subagent-codex: app-server returned an unknown agent message phase ${JSON.stringify(item.phase)}`)
       }
+      return
+    }
+    if (method === 'error') {
+      const threadId = string(params.threadId, 'error thread id')
+      if (threadId !== this.threadId) return
+      const id = params.turnId
+      if (typeof id === 'string') {
+        if (this.turnId === undefined) {
+          if (this.turnCompleted !== undefined) {
+            this.observePendingTurnId(id)
+            this.earlyTurnNotifications.push({ method, params })
+          }
+          return
+        }
+        if (id !== this.turnId) return
+      }
+      this.observeErrorNotification(params)
       return
     }
     if (method !== 'turn/completed') return

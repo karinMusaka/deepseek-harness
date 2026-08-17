@@ -18,6 +18,10 @@
 
 `timeoutSeconds` 会以本实例自身的墙钟时间，限定一次前台调用与一次一次性后台调用——这两种运行都由本工具从头到尾拥有，因此其计时器不仅覆盖被等待的结果，也覆盖 `ctx.subagents.start()` 本身（例如启动期卡死的提供方，而不仅是结果挂起）。到期时，合成信号的中止方式与调用方取消完全相同，但前台工具结果会读作超时而非取消，而真正的调用方取消即便与已启动的计时器竞争，仍会读作取消。省略该键会保留现有行为：没有上限。将其与 `backgroundMode: 'continuable'` 一起配置会在加载期失败——可继续子 agent 的轮次在 inbox 接受之后归继续执行服务所有，而不属于本工具，因此这里没有可供计时器终止的运行。见[墙钟超时 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md)。
 
+## 失败分类
+
+当一次委派以 `stopReason: 'error'` 结束，且提供方填充了 `SubagentResult.failure`（[`dsh-subagent-codex`](../subagent-codex/README.md)、[`dsh-subagent-claude-code`](../subagent-claude-code/README.md)；进程内提供方从不填充它）时，模型会看到一个分类专属的标题，说明这是哪一种失败——身份验证、使用限额、提供方，还是协议——后面跟着提供方自身的可操作文本，该文本在到达模型可见输出（并借此进入会话日志）之前，已针对凭据形状的模式做过筛查（与 `@deepseek-ai/dsh-subprocess` 的 `scrubbedParentEnv` 使用的同一套词汇表）。已分类的失败还会抛出本包自身的 `SubagentError`（来自 `@deepseek-ai/dsh-subagent`），带有可路由的 `SUBAGENT_AUTH`/`SUBAGENT_QUOTA`/`SUBAGENT_PROVIDER`/`SUBAGENT_PROTOCOL` 代码，通过既有的[结构化错误分类法](../../../.agents/notes/implemented/architecture/2026-06-11-structured-error-taxonomy.md)到达 `ToolExecutionResult.error.info`，而不是走一套新机制。一个提供方无法分类的 `'error'` 结果，会保留此前未分类的 `subagent run failed` 标题，且不带任何可路由代码。见[失败分类 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-failure-classification.md)。
+
 ## 配置
 
 | 键 | 含义 |
@@ -57,7 +61,7 @@
 
 #### 模型看到的内容
 
-调用会保留描述和提示词。成功时只包含子 agent 的最终文本；其他结果变为 `Error: <message>`。子 agent 中间步骤不会进入父级。若配置的 `timeoutSeconds` 终止了运行，结果会读作 `Error: subagent run hit its <N>s time limit before finishing`（外加任何保留下来的部分文本）——与调用方取消的消息 `Error: subagent run was cancelled` 不同，因此模型不会把两者混淆。
+调用会保留描述和提示词。成功时只包含子 agent 的最终文本；其他结果变为 `Error: <message>`。子 agent 中间步骤不会进入父级。若配置的 `timeoutSeconds` 终止了运行，结果会读作 `Error: subagent run hit its <N>s time limit before finishing`（外加任何保留下来的部分文本）——与调用方取消的消息 `Error: subagent run was cancelled` 不同，因此模型不会把两者混淆。一次已分类的原生失败（见上文"失败分类"）会读作 `Error: subagent could not authenticate with its provider: <提供方自身的文本>`，或者对应使用限额、提供方、协议失败的相应行。
 
 #### Token 影响
 
@@ -87,3 +91,4 @@
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）：可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
 - **每个实例的子 agent 策略固定**：其他模型、persona、工具过滤器或深度上限都需要另一个名称不同的工具。
 - **一次性后台运行的超时对通用 Task 接口不可见**——`job_output`／结算通知会把超时的一次性子 agent 报告得与被 `job_kill` 终止的子 agent一模一样（`[status: killed]`）；只有前台路径的工具结果会把超时单独标出。为共享的 `JobOutcome` 增加这项区分被推迟；见[墙钟超时 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md)。
+- **脱敏基于模式匹配，并非详尽无遗**——`redactCredentialShapedText` 只会屏蔽紧跟在 `:`/`=` 与一个值之前的凭据形状标签；如果泄露的秘密没有相邻标签，或者其形状不属于 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 中任何一个所命名的形态，就不会被捕获。这与 `scrubbedParentEnv` 用来阻止凭据进入被 spawn 子进程自身环境的词汇表相同，而不是一个通用的秘密扫描器。

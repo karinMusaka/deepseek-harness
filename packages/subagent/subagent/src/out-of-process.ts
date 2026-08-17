@@ -14,7 +14,7 @@
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentCapabilities, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
+import type { SubagentCapabilities, SubagentFailureDetail, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
 
 /**
  * The capability advertisement of an out-of-process backend: NONE. A child in
@@ -132,6 +132,20 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
 }
 
+/**
+ * Thrown by an out-of-process provider's turn attempt to carry a classified
+ * native failure through {@link settleRunResult} into the settled
+ * {@link SubagentResult.failure}. Package-private carrier, not itself
+ * model-facing: `dsh-tool-subagent` reads the settled `failure` field and
+ * raises its own routable, screened error from it.
+ */
+export class ClassifiedSubagentFailure extends Error {
+  constructor(message: string, readonly failure: SubagentFailureDetail) {
+    super(message)
+    this.name = 'ClassifiedSubagentFailure'
+  }
+}
+
 /** Inputs to {@link settleRunResult}. */
 export interface RunResultSettlement {
   /** The turn attempt (typically racing local cancellation); returns the terminal result. */
@@ -146,33 +160,49 @@ export interface RunResultSettlement {
   signal: AbortSignal
   /** The abort listener registered on {@link signal} at start. */
   onAbort: () => void
+  /**
+   * How this child authenticated, known before the attempt runs (derived from
+   * the provider's own deployment config). Attached to every settled result —
+   * success, aborted, or error — because it describes the child's identity,
+   * not its outcome.
+   */
+  authMode?: SubagentResult['authMode']
 }
 
 /**
  * Settle an out-of-process run result under the seam contract: `result` never
  * rejects after publication. A normally completed or rejected attempt resolves
  * as `aborted` when cancellation already settled locally; another rejection is
- * flattened to `stopReason: 'error'` through the contained diagnostic sink.
- * The abort listener is removed on every path.
+ * flattened to `stopReason: 'error'` through the contained diagnostic sink,
+ * preserving a {@link ClassifiedSubagentFailure}'s classification onto the
+ * settled result. The abort listener is removed on every path.
  * @param parts - the attempt, output snapshot, cancellation state, sink, and signal wiring.
  * @returns the terminal result (never a rejection).
  */
 export async function settleRunResult(parts: RunResultSettlement): Promise<SubagentResult> {
+  const withAuthMode = (result: SubagentResult): SubagentResult =>
+    parts.authMode === undefined ? result : { ...result, authMode: parts.authMode }
   try {
     const result = await parts.attempt()
     return parts.cancelled()
-      ? { output: parts.collectOutput(), stopReason: 'aborted' }
-      : result
+      ? withAuthMode({ output: parts.collectOutput(), stopReason: 'aborted' })
+      : withAuthMode(result)
   } catch (error: unknown) {
     // Cover a rejection already queued when cancellation arrives.
-    if (parts.cancelled()) return { output: parts.collectOutput(), stopReason: 'aborted' }
+    if (parts.cancelled()) return withAuthMode({ output: parts.collectOutput(), stopReason: 'aborted' })
     // Flatten post-publication transport failures while preserving diagnostics.
+    const normalized = toError(error)
     try {
-      parts.onError?.(toError(error), 'error')
+      parts.onError?.(normalized, 'error')
     } catch {
       // The diagnostic sink cannot reject the run result.
     }
-    return { output: parts.collectOutput(), stopReason: 'error' }
+    const failure = normalized instanceof ClassifiedSubagentFailure ? normalized.failure : undefined
+    return withAuthMode({
+      output: parts.collectOutput(),
+      stopReason: 'error',
+      ...failure !== undefined ? { failure } : {},
+    })
   } finally {
     parts.signal.removeEventListener('abort', parts.onAbort)
   }

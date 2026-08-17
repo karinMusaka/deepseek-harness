@@ -237,6 +237,58 @@ describe('dsh-tool-subagent', () => {
     expect(text(result)).toContain('scripted subagent reply')
   })
 
+  it.each([
+    { code: 'auth' as const, noun: 'subagent could not authenticate with its provider', errorCode: 'SUBAGENT_AUTH' },
+    { code: 'quota' as const, noun: 'subagent hit its provider\'s usage limit', errorCode: 'SUBAGENT_QUOTA' },
+    { code: 'provider' as const, noun: 'subagent\'s provider failed', errorCode: 'SUBAGENT_PROVIDER' },
+    { code: 'protocol' as const, noun: 'subagent\'s provider violated its own protocol', errorCode: 'SUBAGENT_PROTOCOL' },
+  ])('surfaces a classified $code failure with its class noun and a routable SubagentError code', async ({ code, noun, errorCode }) => {
+    const ctx = await setup({ provider: 'mock' }, {
+      stopReason: 'error',
+      failure: { code, message: 'Not logged in · Please run /login' },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain(noun)
+    // The provider's own actionable text reaches the model verbatim.
+    expect(text(result)).toContain('Not logged in · Please run /login')
+    // The routable code reaches `ToolExecutionResult.error.info` — the
+    // existing structured-error-taxonomy path (`HarnessError` → `ToolFailure`)
+    // — without this PR inventing a parallel classification mechanism.
+    expect(result.isError && result.error.info).toEqual({ name: 'SubagentError', code: errorCode })
+  })
+
+  it('keeps the prior unclassified headline and no routable code when the provider could not classify the cause', async () => {
+    const ctx = await setup({ provider: 'mock' }, { stopReason: 'error' })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent run failed')
+    expect(result.isError && result.error.info).toBeUndefined()
+  })
+
+  it('redacts a credential-shaped provider message before it reaches the model (and, through it, the session log)', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      stopReason: 'error',
+      failure: {
+        code: 'provider',
+        message: 'upstream rejected api_key=sk-should-not-leak-1234 (request id: req_abc, cf-ray: fixture-ray)',
+      },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    const rendered = text(result)
+    expect(rendered).not.toContain('sk-should-not-leak-1234')
+    expect(rendered).toContain('[REDACTED]')
+    // Non-secret operational identifiers survive unchanged.
+    expect(rendered).toContain('request id: req_abc')
+    expect(rendered).toContain('cf-ray: fixture-ray')
+  })
+
+  it('never carries a failure detail on a successful result', async () => {
+    const ctx = await setup({ provider: 'mock' }, { stopReason: 'completed' })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(false)
+  })
+
   it('registers under a configurable toolName so multiple providers can coexist', async () => {
     // The defining multi-provider use case: two loads, two distinct tool names,
     // each bound to a different provider — the tool registry rejects duplicate

@@ -36,11 +36,14 @@ import {
   sdkEnvironmentOverlay,
 } from '../src/process.ts'
 import {
+  claudeFailureMessage,
   claudeQueryOptions,
+  classifyAssistantError,
+  classifyClaudeFailure,
   consumeClaudeQuery,
   disposeClaudeCodeChild,
+  resultFields,
   startClaudeCodeRun,
-  successfulResult,
   textTask,
   type ClaudeCodeRunSpec,
 } from '../src/run.ts'
@@ -368,6 +371,8 @@ describe('task admission and package contracts', () => {
     await expect(run.result).resolves.toEqual({
       output: [],
       stopReason: 'error',
+      // `Config.env` above sets a credential-shaped `ANTHROPIC_API_KEY`.
+      authMode: 'api-key',
     })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(
       'subagent-claude-code: child run failed (error):',
@@ -633,20 +638,111 @@ describe('query options and result mapping', () => {
     }
   })
 
-  it('accepts only a non-error success with a non-blank final result', () => {
-    expect(successfulResult(success('exact final'))).toBe('exact final')
-    expect(() => successfulResult(success('answer', true)))
-      .toThrow('marked as an error')
-    expect(() => successfulResult(success(' \n ')))
-      .toThrow('contained no answer')
-    expect(() => successfulResult(failure(
-      'error_during_execution',
-      ['first', 'second'],
-    ))).toThrow('first; second')
-    expect(() => successfulResult(failure(
-      'error_max_turns',
-      [],
-    ))).toThrow('error_max_turns')
+  it('reads is_error/terminal_reason/api_error_status directly, never subtype', () => {
+    // Measured against Claude Agent SDK 0.3.220 with no credential configured:
+    // `is_error: true` while `subtype` stays `'success'`. `resultFields` must
+    // not be fooled by that discriminant.
+    const loggedOut = {
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: null,
+      result: 'Not logged in · Please run /login',
+    } as unknown as SDKResultMessage
+    expect(resultFields(loggedOut)).toEqual({
+      isError: true,
+      terminalReason: 'api_error',
+      apiErrorStatus: null,
+      resultText: 'Not logged in · Please run /login',
+      errors: undefined,
+    })
+    expect(resultFields(success('exact final'))).toEqual({
+      isError: false,
+      terminalReason: undefined,
+      apiErrorStatus: null,
+      resultText: 'exact final',
+      errors: undefined,
+    })
+    // A real numeric `api_error_status` (401/429), not only the absent/null case.
+    expect(resultFields({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      api_error_status: 429,
+      result: 'rate limited',
+    } as unknown as SDKResultMessage)).toEqual({
+      isError: true,
+      terminalReason: undefined,
+      apiErrorStatus: 429,
+      resultText: 'rate limited',
+      errors: undefined,
+    })
+  })
+
+  it('classifies a terminal failure from api_error_status, never from subtype text alone', () => {
+    const fields = (overrides: Partial<ReturnType<typeof resultFields>>) => ({
+      isError: true,
+      terminalReason: 'api_error',
+      apiErrorStatus: null,
+      resultText: undefined,
+      errors: undefined,
+      ...overrides,
+    })
+    expect(classifyClaudeFailure(fields({ apiErrorStatus: 401 }), undefined)).toBe('auth')
+    expect(classifyClaudeFailure(fields({ apiErrorStatus: 429 }), undefined)).toBe('quota')
+    expect(classifyClaudeFailure(fields({}), undefined)).toBe('provider')
+    // A retained assistant-message cause wins over `api_error_status`.
+    expect(classifyClaudeFailure(fields({ apiErrorStatus: 429 }), 'auth')).toBe('auth')
+  })
+
+  it('classifies SDKAssistantMessageError onto the seam vocabulary, tolerating a future unrecognized value', () => {
+    expect(classifyAssistantError('authentication_failed')).toBe('auth')
+    expect(classifyAssistantError('oauth_org_not_allowed')).toBe('auth')
+    expect(classifyAssistantError('rate_limit')).toBe('quota')
+    expect(classifyAssistantError('billing_error')).toBe('quota')
+    expect(classifyAssistantError('overloaded')).toBe('quota')
+    expect(classifyAssistantError('invalid_request')).toBe('provider')
+    expect(classifyAssistantError('model_not_found')).toBe('provider')
+    expect(classifyAssistantError('server_error')).toBe('provider')
+    expect(classifyAssistantError('unknown')).toBe('provider')
+    // A per-message truncation note, not a terminal-failure signal.
+    expect(classifyAssistantError('max_output_tokens')).toBeUndefined()
+    // The SDK's own enum is external and open: an unrecognized future value
+    // must not crash this classifier (no `assertNever` on an external union).
+    expect(classifyAssistantError('some_future_value' as never)).toBe('provider')
+  })
+
+  it('prefers the result\'s own text as the actionable failure message', () => {
+    expect(claudeFailureMessage({
+      isError: true,
+      terminalReason: 'api_error',
+      apiErrorStatus: null,
+      resultText: 'Not logged in · Please run /login',
+      errors: undefined,
+    })).toBe('Not logged in · Please run /login')
+    expect(claudeFailureMessage({
+      isError: true,
+      terminalReason: 'api_error',
+      apiErrorStatus: null,
+      resultText: undefined,
+      errors: ['first', 'second'],
+    })).toBe('first; second')
+    expect(claudeFailureMessage({
+      isError: true,
+      terminalReason: 'max_turns',
+      apiErrorStatus: null,
+      resultText: undefined,
+      errors: undefined,
+    })).toContain('max_turns')
+    // No result text, no errors, and no terminal reason at all.
+    expect(claudeFailureMessage({
+      isError: true,
+      terminalReason: undefined,
+      apiErrorStatus: null,
+      resultText: undefined,
+      errors: undefined,
+    })).toContain('unknown reason')
   })
 
   it('consumes the complete stream and keeps the latest strict success', async () => {
@@ -662,6 +758,27 @@ describe('query options and result mapping', () => {
     await expect(consumeClaudeQuery(
       queryFrom([{ type: 'system', subtype: 'init' } as SDKMessage]),
     )).rejects.toThrow('ended without a result')
+  })
+
+  it('skips a per-message max_output_tokens note instead of retaining it as a failure cause', async () => {
+    const query = queryFrom([
+      { type: 'assistant', error: 'max_output_tokens' } as unknown as SDKMessage,
+      failure('error_during_execution', ['generic failure']),
+    ])
+    const result = await consumeClaudeQuery(query).catch((error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    // `max_output_tokens` is not retained: the terminal failure falls through
+    // to the generic `provider` default, not some retained (nonexistent) class.
+    expect((result as { failure?: { code: string } }).failure?.code).toBe('provider')
+  })
+
+  it('retains a specific assistant-message cause across the stream', async () => {
+    const query = queryFrom([
+      { type: 'assistant', error: 'authentication_failed' } as unknown as SDKMessage,
+      failure('error_during_execution', ['Not logged in · Please run /login']),
+    ])
+    const result = await consumeClaudeQuery(query).catch((error: unknown) => error)
+    expect((result as { failure?: { code: string } }).failure?.code).toBe('auth')
   })
 })
 
@@ -706,6 +823,9 @@ describe('run publication, cancellation, and settlement', () => {
       await expect(run.result).resolves.toEqual({
         output: [],
         stopReason: 'error',
+        // No `api_error_status` and no assistant-message cause: classifies
+        // as the generic `provider` default.
+        failure: { code: 'provider', message: 'fixture failure' },
       })
       expect(onError).toHaveBeenCalledWith(
         expect.any(Error),

@@ -8,9 +8,13 @@ This package registers the fixed `claude-code` subagent provider. Each accepted 
 
 `start(request)` accepts only a non-empty sequence of text blocks and derives the child cwd from the parent Session. It creates one private `AbortController`, calls the official SDK `query()`, and publishes the run only after the SDK's `spawnClaudeCodeProcess` hook has supplied a live CLI handle owned by [`dsh-subprocess`](../../subprocess/subprocess/README.md). A failure or cancellation before publication closes the query, terminates any acquired process tree, waits for it to exit, and rejects `start()`.
 
-The SDK receives the exact concatenated text task. The provider iterates the complete SDK message stream and accepts only a `result` message with `subtype: "success"`, `is_error: false`, and a nonblank `result`, followed by normal iterator completion. Every SDK error subtype, an error-marked success, a missing answer, iterator failure, protocol failure, or process failure maps to `error`; the provider produces neither `max-tokens` nor `refusal`.
+The SDK receives the exact concatenated text task. The provider iterates the complete SDK message stream and accepts only a `result` message with `is_error: false` and a nonblank `result`, followed by normal iterator completion — classified from `is_error` directly, never the result message's own `subtype` (a real logged-out run reports `is_error: true` while `subtype` stays `"success"`; see Failure classification below). Every classified error, a missing answer, iterator failure, protocol failure, or process failure maps to `error`; the provider produces neither `max-tokens` nor `refusal`.
 
 Local cancellation wins the result race and maps to `aborted`. `dispose()` is idempotent: it aborts the run, asks the SDK query to close, invokes the shared process-tree termination escalation, and waits for whole-tree exit. SDK graceful close expresses protocol intent; the subprocess handle remains the authority for process quiescence. Result failure and independent teardown failure remain separate.
+
+### Failure classification
+
+An `error` stop reason carries a classified `SubagentResult.failure` (`auth`/`quota`/`provider`/`protocol`, see [`dsh-subagent`](../../../docs/subsystems/subagent.md#the-terminal-result-subagentresult)). The provider also consumes `assistant` messages (otherwise skipped) to retain the most specific `SDKAssistantMessageError` seen: `authentication_failed`/`oauth_org_not_allowed` classify `auth`; `rate_limit`/`billing_error`/`overloaded` classify `quota`; the remaining named values classify `provider`; `max_output_tokens` is a per-message truncation note, not a terminal-failure signal, and is not retained. At the terminal result, that retained cause wins; failing that, the result's own `api_error_status` (401 → `auth`, 429 → `quota`) decides; failing that, the cause classifies `provider`. `protocol` never applies here — the SDK abstracts its own wire transport entirely. An unrecognized future `SDKAssistantMessageError` value falls through to `provider` rather than failing closed. `SubagentResult.authMode` is `'api-key'` when `Config.env` sets a credential-shaped variable name, `'subscription'` otherwise — derived purely from that configuration, never by reading `~/.claude`.
 
 ## Native settings and permission scope
 
@@ -78,7 +82,7 @@ Independent of the parent request cache. Reuse depends only on Claude Code's own
 
 #### What the model sees
 
-Through `dsh-tool-subagent`, the parent sees only the strict final Claude Code answer or the consumer's exact error for a non-completed result. Claude Code reasoning, tool activity, intermediate messages, stderr, workspace diffs, usage, and product ids are not copied into the parent Session.
+Through `dsh-tool-subagent`, the parent sees only the strict final Claude Code answer or the consumer's exact error for a non-completed result. A classified `error` reaches the model as a class-specific headline (e.g. "subagent could not authenticate with its provider: …") plus Claude Code's own actionable text (e.g. `"Not logged in · Please run /login"`), screened for credential-shaped patterns. Claude Code reasoning, tool activity, intermediate messages, stderr, workspace diffs, usage, and product ids are not copied into the parent Session.
 
 #### Token effect
 
@@ -98,3 +102,6 @@ Append-only: the new tool result follows the reusable parent request prefix.
 - **Final text only** — reasoning, intermediate messages, tool traffic, usage, stderr, and workspace diffs remain product-local.
 - **No optional shared capability besides `permissionMode`** — output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
 - **No wall-clock timeout or side-effect rollback** — the caller cancels long work, and files or external systems changed before cancellation are not restored.
+- **`protocol` is unreachable for this provider** — the SDK owns its own wire transport end to end, so a shape deviation there never reaches this provider as a classifiable cause; a stream or process crash before any result message surfaces as an unclassified `error` instead.
+- **Failure classification is best-effort against an external, open vocabulary** — `SDKAssistantMessageError` may grow in a future SDK release; an unrecognized value classifies as `provider` rather than failing closed.
+- **`authMode` reports configuration, not live account state** — it never probes `~/.claude`, so a deployment that sets a credential-shaped `env` entry the child never actually uses (or vice versa) reports the configured intent, not a verified fact about which credential the child used for a given run.

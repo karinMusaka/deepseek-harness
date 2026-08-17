@@ -316,7 +316,7 @@ type SubagentDescendantListEntry = SubagentListEntry & {
 
 ## 终态结果：`SubagentResult`
 
-单次 run 的最终产出，由 `SubagentRun.result` resolve。`structured` 仅在请求了 `outputSchema` 且成功满足时才存在；请求 schema 不保证一定能得到它，当子 agent 失败或结束时未产出有效 capture 时，提供方可能返回 `stopReason: 'error'`。非 `completed` 的 `stopReason` 意味着 `output` 可能不完整——消费方将其映射为 `isError` 的工具结果，而非将部分输出报告为成功。
+单次 run 的最终产出，由 `SubagentRun.result` resolve。`structured` 仅在请求了 `outputSchema` 且成功满足时才存在；请求 schema 不保证一定能得到它，当子 agent 失败或结束时未产出有效 capture 时，提供方可能返回 `stopReason: 'error'`。非 `completed` 的 `stopReason` 意味着 `output` 可能不完整——消费方将其映射为 `isError` 的工具结果，而非将部分输出报告为成功。`failure` 仅在 `codex`/`claude-code` 提供方能够对 `'error'` 的 stop reason 分类时才存在（[失败分类 Agent Note](../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-failure-classification.md)）；`authMode` 仅对这两个进程外产品提供方存在，纯粹从其部署 `Config.env` 是否设置了凭据形状的变量推导得出。
 
 ```ts type-equiv
 /**
@@ -341,6 +341,58 @@ interface SubagentResult {
   readonly structured?: unknown
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
+  /**
+   * Classified native failure detail. Present only when {@link stopReason} is
+   * `'error'` AND the provider could classify the cause from its own product's
+   * diagnostics; absent on every other stop reason, on success, and on a
+   * provider that has no classification for this failure (the stop reason
+   * alone still reports the run as failed).
+   */
+  readonly failure?: SubagentFailureDetail
+  /**
+   * How the child authenticated with its own product backend: `'api-key'` when
+   * the provider's deployment `Config.env` explicitly sets a credential-shaped
+   * variable, `'subscription'` otherwise — derived purely from that
+   * deployment configuration, never by reading a credential store file
+   * (`~/.claude`, `~/.codex`). Present only for providers that compose a
+   * distinct product identity out of process (`codex`, `claude-code`); absent
+   * for an in-process provider, which shares the harness's own already
+   * -authenticated LLM service and has no separate child identity to report.
+   */
+  readonly authMode?: 'subscription' | 'api-key'
+}
+```
+
+`SubagentFailureCode` 是一个封闭词汇表——不像 `SubagentStopReason` 那样可合并扩展——因为各提供方会把自己产品特定的错误词汇映射到这四个分类上，而不是让这个联合类型按提供方增长；对它做 switch 的消费方应以 `assertNever` 关闭默认分支：
+
+```ts type-equiv
+/**
+ * Closed vocabulary for WHICH KIND of native product failure ended a run.
+ * Orthogonal to {@link SubagentStopReasonMap}: stop reason answers "why did
+ * the run end" (completed/aborted/error/…), this answers "what kind of
+ * failure was it", and is meaningful only when {@link SubagentResult.stopReason}
+ * is `'error'`. Closed, not merge-extensible — unlike {@link SubagentStopReason},
+ * which a backend may widen, a provider maps its own product-specific error
+ * vocabulary (Codex's `codexErrorInfo`, Claude's `SDKAssistantMessageError`)
+ * onto these four buckets rather than this union growing per provider, so a
+ * consumer switch over it stays exhaustive and MUST close with `assertNever`.
+ */
+type SubagentFailureCode = 'auth' | 'quota' | 'provider' | 'protocol'
+```
+
+```ts type-equiv
+/**
+ * One classified native product failure: a routable {@link SubagentFailureCode}
+ * plus the provider's own actionable diagnostic text. A provider populating
+ * this MUST have already screened `message` is not required here — screening
+ * for credential-shaped text happens once, at the model-facing surface
+ * (`dsh-tool-subagent`), not at every provider that can populate this field.
+ */
+interface SubagentFailureDetail {
+  /** Routable failure class; switch on this and close the default case with `assertNever`. */
+  readonly code: SubagentFailureCode
+  /** The provider's own actionable diagnostic text (e.g. "Not logged in · Please run /login"). */
+  readonly message: string
 }
 ```
 
@@ -657,7 +709,7 @@ async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 
 Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:172`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:174`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagent-events"></a>
 
@@ -683,7 +735,7 @@ A published child settled. Scope-filtered dispatch uses the same delegating pare
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:167`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:169`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-added--emit"></a>
 
@@ -700,7 +752,7 @@ A provider became resolvable in the registry.
 'subagent/provider-added'(provider: SubagentProvider): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:141`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:143`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-removed--emit"></a>
 
@@ -717,7 +769,7 @@ A provider left the registry. Accepted runs remain holder-owned.
 'subagent/provider-removed'(name: string): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:147`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:149`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentstart--emit"></a>
 
@@ -741,5 +793,5 @@ A provider established a published child. For in-process providers, `ctx.agents.
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:158`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:160`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

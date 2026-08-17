@@ -30,6 +30,7 @@ export type ResponsesBehavior =
     }[]
   }
   | { readonly kind: 'hold' }
+  | { readonly kind: 'unauthorized' }
 
 /** Running package-private Responses fixture. */
 export interface ResponsesFixture {
@@ -261,7 +262,12 @@ export async function startResponsesFixture(
         body: parsedBody,
       })
       started.resolve(undefined)
-      const behavior = behaviors.shift()
+      // A real unauthenticated backend fails identically on every retry
+      // attempt of the same turn — an `unauthorized` script entry is sticky
+      // (peeked, never consumed) so codex-core's own reconnect ladder
+      // observes the same 401 on each of its several requests, exactly like
+      // a real unauthenticated account.
+      const behavior = behaviors[0]?.kind === 'unauthorized' ? behaviors[0] : behaviors.shift()
       if (behavior === undefined) {
         response.writeHead(500, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: { message: 'fixture script exhausted' } }))
@@ -273,6 +279,26 @@ export async function startResponsesFixture(
       if (behavior.kind === 'advertisedFunctionCall' && advertisedCall === undefined) {
         response.writeHead(500, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: { message: 'none of the fixture function calls was advertised' } }))
+        return
+      }
+      if (behavior.kind === 'unauthorized') {
+        // Matches the real unauthenticated capture verbatim enough to
+        // reproduce codex-core's own reconnect ladder and terminal
+        // degradation to `codexErrorInfo: "other"` (see the
+        // failure-classification Agent Note): a bare 401 with no
+        // `WWW-Authenticate` retry hint.
+        response.writeHead(401, {
+          'content-type': 'application/json',
+          'x-request-id': 'req_fixture',
+          'cf-ray': 'fixture-cf-ray',
+        })
+        response.end(JSON.stringify({
+          error: {
+            message: 'Missing bearer or basic authentication in header',
+            type: 'invalid_request_error',
+            code: 'invalid_api_key',
+          },
+        }))
         return
       }
       response.writeHead(200, {

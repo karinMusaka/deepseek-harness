@@ -13,6 +13,7 @@ import {
   type Options,
   type PermissionResult,
   type Query,
+  type SDKAssistantMessageError,
   type SDKMessage,
   type SDKResultMessage,
   type SpawnOptions,
@@ -21,8 +22,10 @@ import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
+  ClassifiedSubagentFailure,
   settleRunResult,
   subprocessRunHandle,
+  type SubagentFailureCode,
   type SubagentPermissionMode,
   type SubagentResult,
   type SubagentRun,
@@ -58,6 +61,13 @@ export interface ClaudeCodeRunSpec {
   readonly executable: string
   /** Explicit deployment/test environment layered after shared scrubbing. */
   readonly env: Record<string, string>
+  /**
+   * How this child authenticates, derived purely from {@link env} by the
+   * provider (`Config.env` setting a credential-shaped variable name means
+   * `'api-key'`) — never by reading `~/.claude`. Attached to every settled
+   * result.
+   */
+  readonly authMode?: SubagentResult['authMode']
   /** Subprocess termination grace passed to the shared process-tree owner. */
   readonly disposeGraceMs: number
   /** Shared subprocess service spawn operation. */
@@ -95,27 +105,112 @@ export function textTask(prompt: readonly ContentBlock[]): string {
 }
 
 /**
- * Strictly derive the only SDK result that can complete a shared run.
- * @param message - an official discriminated result union.
- * @returns exact final text for a successful, non-error result.
+ * Fields read directly off an `SDKResultMessage`, bypassing its own `subtype`
+ * discriminant. Measured against Claude Agent SDK 0.3.220 with no credential
+ * configured: a real logged-out run reports `is_error: true` while `subtype`
+ * stays `'success'` (see the Agent Note) — narrowing through the union's own
+ * discriminant would silently classify that run as successful. Classify from
+ * `is_error`/`terminal_reason`/`api_error_status` instead, never `subtype`.
  */
-export function successfulResult(message: SDKResultMessage): string {
-  if (
-    message.subtype !== 'success'
-    || message.is_error
-    || message.result.trim().length === 0
-  ) {
-    const detail = message.subtype === 'success'
-      ? 'success result was marked as an error or contained no answer'
-      : message.errors.join('; ') || message.subtype
-    throw new Error(`subagent-claude-code: Claude Code failed: ${detail}`)
+export interface ClaudeResultFields {
+  readonly isError: boolean
+  readonly terminalReason: string | undefined
+  readonly apiErrorStatus: number | null
+  readonly resultText: string | undefined
+  readonly errors: string[] | undefined
+}
+
+/**
+ * Read {@link ClaudeResultFields} off a result message without trusting its
+ * `subtype` discriminant.
+ * @param message - an official discriminated result union member.
+ * @returns the fields this module classifies on.
+ */
+export function resultFields(message: SDKResultMessage): ClaudeResultFields {
+  const record = message as unknown as Record<string, unknown>
+  return {
+    isError: record.is_error === true,
+    terminalReason: typeof record.terminal_reason === 'string' ? record.terminal_reason : undefined,
+    apiErrorStatus: typeof record.api_error_status === 'number' ? record.api_error_status : null,
+    resultText: typeof record.result === 'string' ? record.result : undefined,
+    errors: Array.isArray(record.errors)
+      ? record.errors.filter((entry): entry is string => typeof entry === 'string')
+      : undefined,
   }
-  return message.result
+}
+
+/**
+ * Map one `SDKAssistantMessageError` to the seam's closed failure vocabulary.
+ * The enum is external and open (a future SDK release may add a value):
+ * an unrecognized future value falls through to `'provider'`, never
+ * `assertNever` — that guard is reserved for a closed {@link SubagentFailureCode}
+ * switch, not this open external enum.
+ * @param error - the assistant message's own classified cause.
+ * @returns the seam failure code, or `undefined` when the value is not a
+ *   terminal-failure signal (`max_output_tokens` notes a per-message
+ *   truncation, not a run-ending cause).
+ */
+export function classifyAssistantError(error: SDKAssistantMessageError): SubagentFailureCode | undefined {
+  switch (error) {
+    case 'authentication_failed':
+    case 'oauth_org_not_allowed':
+      return 'auth'
+    case 'rate_limit':
+    case 'billing_error':
+    case 'overloaded':
+      return 'quota'
+    case 'max_output_tokens':
+      return undefined
+    case 'invalid_request':
+    case 'model_not_found':
+    case 'server_error':
+    case 'unknown':
+      return 'provider'
+    default:
+      return 'provider'
+  }
+}
+
+/**
+ * Classify a terminal result already known to have `is_error: true`. Prefers
+ * the most specific cause retained from the run's own assistant messages (the
+ * pinned SDK's clean `SDKAssistantMessageError` enum) over the result
+ * message's own `api_error_status`, and falls back to `'provider'` when
+ * neither signal narrows further. `'protocol'` never applies here: the SDK
+ * abstracts its own wire transport entirely (see the package README's Known
+ * Limitations).
+ * @param fields - the terminal result's own fields.
+ * @param retainedAssistantClass - the most specific classifiable assistant
+ *   error seen so far this run, if any.
+ * @returns the classified failure code.
+ */
+export function classifyClaudeFailure(
+  fields: ClaudeResultFields,
+  retainedAssistantClass: SubagentFailureCode | undefined,
+): SubagentFailureCode {
+  if (retainedAssistantClass !== undefined) return retainedAssistantClass
+  if (fields.apiErrorStatus === 401) return 'auth'
+  if (fields.apiErrorStatus === 429) return 'quota'
+  return 'provider'
+}
+
+/**
+ * The provider's own actionable text for a terminal failure: the result's own
+ * text when present (e.g. `"Not logged in · Please run /login"`, already
+ * usable as-is), else joined `errors`, else a generic fallback naming the
+ * terminal reason.
+ * @param fields - the terminal result's own fields.
+ * @returns non-empty diagnostic text.
+ */
+export function claudeFailureMessage(fields: ClaudeResultFields): string {
+  if (fields.resultText !== undefined && fields.resultText.trim().length > 0) return fields.resultText
+  if (fields.errors !== undefined && fields.errors.length > 0) return fields.errors.join('; ')
+  return `subagent-claude-code: Claude Code failed (${fields.terminalReason ?? 'unknown reason'})`
 }
 
 /**
  * Consume the complete SDK stream and require one strict success plus normal
- * iterator completion.
+ * iterator completion. Classifies from {@link resultFields}, never `subtype`.
  * @param query - published official SDK query.
  * @returns the completed shared result.
  */
@@ -123,9 +218,25 @@ export async function consumeClaudeQuery(
   query: AsyncIterable<SDKMessage>,
 ): Promise<SubagentResult> {
   let answer: string | undefined
+  let retainedAssistantClass: SubagentFailureCode | undefined
   for await (const message of query) {
+    if (message.type === 'assistant' && message.error !== undefined) {
+      const classified = classifyAssistantError(message.error)
+      if (classified !== undefined) retainedAssistantClass = classified
+      continue
+    }
     if (message.type !== 'result') continue
-    answer = successfulResult(message)
+    const fields = resultFields(message)
+    if (!fields.isError) {
+      if (fields.resultText !== undefined && fields.resultText.trim().length > 0) {
+        answer = fields.resultText
+        continue
+      }
+      throw new Error('subagent-claude-code: Claude Code succeeded but returned no answer')
+    }
+    const code = classifyClaudeFailure(fields, retainedAssistantClass)
+    const failureText = claudeFailureMessage(fields)
+    throw new ClassifiedSubagentFailure(failureText, { code, message: failureText })
   }
   if (answer === undefined) {
     throw new Error('subagent-claude-code: Claude Code ended without a result')
@@ -345,6 +456,7 @@ export async function startClaudeCodeRun(
     onError: spec.onError,
     signal: request.signal,
     onAbort,
+    authMode: spec.authMode,
   })
 
   return subprocessRunHandle({

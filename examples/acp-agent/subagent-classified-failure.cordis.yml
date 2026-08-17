@@ -1,0 +1,13 @@
+# Snapshot-only classified-failure overlay: the real forked child still runs
+# its scripted turn to completion, and the injector below replaces only the
+# settled result with a fixed `auth` failure, so this scenario pins
+# `dsh-tool-subagent`'s model-visible classified-failure text without
+# spawning a real Codex/Claude Code product process.
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - insert:
+          - id: subagent-classified-failure
+            name: './tests/fixtures/subagent-classified-failure.ts'
