@@ -51,7 +51,11 @@ type ResolvedConfig = Required<Config>
  * the Codex sibling; each product's lifecycle remains package-private. */
 class ClaudeCodeProvider implements SubagentProvider {
   readonly name = 'claude-code'
-  readonly capabilities: SubagentCapabilities = NO_START_CAPABILITIES
+  // Every other start-time capability stays NO_START_CAPABILITIES's `false`: an
+  // out-of-process SDK child cannot honor `outputSchema`/`maxDepth`/
+  // `toolFilter`/`persona`. `permissionMode` is the one exception — the fixed
+  // `canUseTool` allowlist below enforces it.
+  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true }
   readonly inheritsParentContext = false
 
   constructor(
@@ -77,6 +81,9 @@ class ClaudeCodeProvider implements SubagentProvider {
         undefined,
         parentCwd,
       ),
+      // Absent means the provider's own default (`SubagentStartRequest.permissionMode` JSDoc):
+      // fixed here as `read-only`, never left to the host's own Claude settings.
+      permissionMode: request.permissionMode ?? 'read-only',
       executable,
       env: this.config.env,
       disposeGraceMs: this.config.disposeGraceMs,

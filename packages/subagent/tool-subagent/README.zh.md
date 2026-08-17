@@ -14,6 +14,8 @@
 
 `toolFilter` 会改变子 agent 的全局工具层，但不是从父级派生的权限上限。见 [agent 作用域的安全非目标](../../../.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md#security-and-authority-are-non-goals)。
 
+`permissionMode` 会为本工具实例发起的每一次委派固定子 agent 的权限范围；它是部署配置，绝不是模型可见的工具参数——模型无法为某一次调用请求更宽的范围。省略该键会保留提供方自身的默认值（对每个具备该能力的提供方而言均为 `read-only`）；显式设置该值则要求提供方具备 `permissionMode` 能力，缺失时挂载会失败。见[审批钉定 Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md)和[权限范围 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md)。
+
 ## 配置
 
 | 键 | 含义 |
@@ -26,6 +28,7 @@
 | `persona` | 每个子 agent 独立的 persona；要求提供方具备 `persona` 能力。 |
 | `toolFilter` | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力。 |
 | `maxDepth` | 绝对委派深度上限，默认 `3`（`0` 禁止委派）；数值上限要求 `depthLimit` 能力，缺失时挂载失败。对于预算由子 harness 拥有的进程外提供方，`'provider-managed'` 不发送上限。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。 |
+| `permissionMode` | 固定的子 agent 权限范围（`'read-only'` \| `'workspace-write'`）；要求 `permissionMode` 能力，缺失时挂载失败。省略则保留提供方自身的默认值（`read-only`）。模型永远不可见——仅是部署方的选择。 |
 
 ## 并发
 

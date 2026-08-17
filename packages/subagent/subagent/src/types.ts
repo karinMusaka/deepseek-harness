@@ -88,7 +88,18 @@ export interface SubagentCapabilities {
   readonly depthLimit: boolean
   readonly toolFilter: boolean
   readonly persona: boolean
+  readonly permissionMode: boolean
 }
+
+/**
+ * Closed permission vocabulary for a child fixed at delegation. A widening
+ * decision always belongs to the parent side ([pinned-approval Agent
+ * Note](../../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md)),
+ * so this is never a model-facing tool argument — only a deployment (cordis.yml
+ * or preset) selects it. Closed, not merge-extensible: widening the vocabulary
+ * itself is the same parent-side decision the Note reserves.
+ */
+export type SubagentPermissionMode = 'read-only' | 'workspace-write'
 
 /**
  * What a caller asks for when starting a ONE-SHOT subagent. The tool layer
@@ -146,6 +157,14 @@ export interface SubagentStartRequest {
    * persona (strict `{{…}}` interpolation against the registered variables).
    */
   readonly persona?: string
+  /**
+   * Optional permission scope fixed for the child at delegation. Requires
+   * {@link SubagentCapabilities.permissionMode}; rejected at start otherwise.
+   * `read-only` forbids every write-capable operation; `workspace-write`
+   * confines writes to the child's working directory. Absent means the
+   * provider's own default, which every provider defines as `read-only`.
+   */
+  readonly permissionMode?: SubagentPermissionMode
 }
 
 /**

@@ -14,6 +14,8 @@ A foreground call passes the execution signal through startup and execution, awa
 
 `toolFilter` changes the child's global tool layer but is not a parent-derived authority ceiling. See the [agent-scope security non-goal](../../../.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md#security-and-authority-are-non-goals).
 
+`permissionMode` fixes the child's permission scope for every delegation this tool instance starts; it is deployment configuration, never a model-facing tool argument — the model cannot request a wider scope for one call. Omitting the key leaves the provider's own default (`read-only` for every provider that has the capability); an explicit value requires the provider's `permissionMode` capability and fails the mount without it. See the [pinned-approval Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md) and the [permission-scope Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md).
+
 ## Config
 
 | Key | Meaning |
@@ -26,6 +28,7 @@ A foreground call passes the execution signal through startup and execution, awa
 | `persona` | Per-child persona; requires provider `persona` capability. |
 | `toolFilter` | Per-child global-tool restriction; requires `toolFilter` capability. |
 | `maxDepth` | Absolute delegation-depth cap, default `3` (`0` forbids delegation); a numeric cap requires the `depthLimit` capability and fails the mount without it. `'provider-managed'` sends no cap for an out-of-process provider whose budget belongs to the child harness. The tool stays visible at the cap; each attempted start checks the calling agent's current depth and returns an errored tool result when rejected. |
+| `permissionMode` | Fixed child permission scope (`'read-only'` \| `'workspace-write'`); requires the `permissionMode` capability and fails the mount without it. Omitted leaves the provider's own default (`read-only`). Never model-visible — a deployment-only choice. |
 
 ## Concurrency
 

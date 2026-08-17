@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -122,7 +123,9 @@ interface RealHarness {
   readonly executable: string
 }
 
-async function realHarness(behavior: MessagesBehavior): Promise<{
+async function realHarness(
+  script: readonly MessagesBehavior[] | ((workspace: string) => readonly MessagesBehavior[]),
+): Promise<{
   readonly harness: RealHarness
   readonly fixture: MessagesFixture
 }> {
@@ -146,7 +149,7 @@ async function realHarness(behavior: MessagesBehavior): Promise<{
     join(claudeConfig, 'settings.json'),
     `${JSON.stringify({ model: settingsModel }, null, 2)}\n`,
   )
-  const fixture = await startMessagesFixture(behavior)
+  const fixture = await startMessagesFixture(typeof script === 'function' ? script(workspace) : script)
   fixtures.push(fixture)
   const env = {
     PATH: `${nativeBin}${delimiter}${process.env.PATH ?? ''}`,
@@ -200,28 +203,50 @@ async function expectQuiescent(
   }
 }
 
+/** Extract every `tool_result` content string across a script of requests. */
+function toolResultTexts(requests: readonly { readonly body: Record<string, unknown> }[]): string[] {
+  return requests.flatMap((request): string[] => {
+    const messages = request.body.messages
+    if (!Array.isArray(messages)) return []
+    return messages.flatMap((message): string[] => {
+      if (message === null || typeof message !== 'object' || (message as { role?: unknown }).role !== 'user') return []
+      const content = (message as { content?: unknown }).content
+      if (!Array.isArray(content)) return []
+      return content.flatMap((block): string[] =>
+        block !== null
+        && typeof block === 'object'
+        && (block as { type?: unknown }).type === 'tool_result'
+        && typeof (block as { content?: unknown }).content === 'string'
+          ? [(block as { content: string }).content]
+          : [])
+    })
+  })
+}
+
 function startRequest(
   harness: RealHarness,
   prompt: string,
   signal = new AbortController().signal,
+  permissionMode?: 'read-only' | 'workspace-write',
 ) {
   return harness.ctx.subagents.start('claude-code', {
     prompt: [{ type: 'text', text: prompt }],
     parent: harness.parent,
     signal,
+    ...permissionMode !== undefined ? { permissionMode } : {},
   })
 }
 
 describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 fixture', {
   timeout: 60_000,
 }, () => {
-  it('inherits host settings and sends the exact task and fake key to local Messages', async () => {
+  it('does not inherit host settings (settingSources: []) and sends the exact task and fake key to local Messages', async () => {
     const sentinel = 'REAL_CLAUDE_CODE_SENTINEL_2_1_220'
     const task = 'Return the fixture sentinel exactly.'
-    const { harness, fixture } = await realHarness({
+    const { harness, fixture } = await realHarness([{
       kind: 'complete',
       text: sentinel,
-    })
+    }])
     expect(sdkPackage.version).toBe('0.3.220')
     expect(sdkPackage.claudeCodeVersion).toBe('2.1.220')
     expect(sdkPackage.optionalDependencies[platformPackage]).toBe('0.3.220')
@@ -260,7 +285,12 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
     expect(recorded.method).toBe('POST')
     expect(recorded.path).toMatch(/^\/v1\/messages(?:\?.*)?$/)
     expect(recorded.headers['x-api-key']).toBe(fakeKey)
-    expect(recorded.body.model).toBe(settingsModel)
+    // `settingSources: []` (fixed at delegation) means the child never reads
+    // `claude-config/settings.json`; without it, the model would be the
+    // fixture's `settingsModel` marker (empirically confirmed pre-fix). The
+    // real CLI falls back to its own bundled default instead.
+    expect(recorded.body.model).not.toBe(settingsModel)
+    expect(recorded.body.model).toBe('claude-opus-5')
     expect(Array.isArray(recorded.body.messages)).toBe(true)
     const messageTexts = (
       recorded.body.messages as Array<{ content?: unknown }>
@@ -279,7 +309,7 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
   })
 
   it('maps a real CLI process failure to error', async () => {
-    const { harness, fixture } = await realHarness({ kind: 'hold' })
+    const { harness, fixture } = await realHarness([{ kind: 'hold' }])
     const run = await startRequest(harness, 'Exercise the failure path.')
     await fixture.requestStarted
     expect(harness.handles).toHaveLength(1)
@@ -295,7 +325,7 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
   })
 
   it('settles cancellation and leaves the real SDK-spawned CLI tree quiescent', async () => {
-    const { harness, fixture } = await realHarness({ kind: 'hold' })
+    const { harness, fixture } = await realHarness([{ kind: 'hold' }])
     const controller = new AbortController()
     const run = await startRequest(
       harness,
@@ -309,6 +339,70 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
       stopReason: 'aborted',
     })
     await run.dispose()
+    await expectQuiescent(harness.handles)
+  })
+})
+
+describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeout: 60_000 }, () => {
+  it('a read-only child can read a file through the real CLI\'s own Read tool', async () => {
+    const sentinel = 'REAL_CLAUDE_CODE_READ_ONLY_READ_SENTINEL'
+    const { harness, fixture } = await realHarness(workspace => [
+      { kind: 'toolUse', name: 'Read', input: { file_path: join(workspace, 'probe.txt') } },
+      { kind: 'complete', text: 'read the probe file' },
+    ])
+    writeFileSync(join(harness.workspace, 'probe.txt'), sentinel)
+    const run = await startRequest(harness, 'Read probe.txt and report it.', undefined, 'read-only')
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'read the probe file' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    expect(fixture.requests).toHaveLength(2)
+    // The real CLI actually ran Read; its result crosses back to the model
+    // as the tool's own output, not the model's self-report.
+    expect(JSON.stringify(fixture.requests[1]!.body)).toContain(sentinel)
+    await expectQuiescent(harness.handles)
+  })
+
+  it('a read-only child cannot create a file — Write is denied, and a Bash bypass attempt is also denied', async () => {
+    const { harness, fixture } = await realHarness(workspace => [
+      { kind: 'toolUse', name: 'Write', input: { file_path: join(workspace, 'marker.txt'), content: 'WROTE' }, id: 'toolu_dsh_fixture_write' },
+      { kind: 'toolUse', name: 'Bash', input: { command: 'printf WROTE > marker2.txt' }, id: 'toolu_dsh_fixture_bash' },
+      { kind: 'complete', text: 'both attempts were denied' },
+    ])
+    const run = await startRequest(harness, 'Create marker.txt.', undefined, 'read-only')
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'both attempts were denied' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    // Verify the world, not the model's self-report: neither path created a file.
+    expect(existsSync(join(harness.workspace, 'marker.txt'))).toBe(false)
+    expect(existsSync(join(harness.workspace, 'marker2.txt'))).toBe(false)
+    expect(fixture.requests).toHaveLength(3)
+    const denials = toolResultTexts(fixture.requests.slice(1)).join('\n')
+    expect(denials).toContain('"Write" is outside the delegated child\'s fixed "read-only" permission scope')
+    expect(denials).toContain('"Bash" is outside the delegated child\'s fixed "read-only" permission scope')
+    await expectQuiescent(harness.handles)
+  })
+
+  it('a workspace-write child can create a file through the real CLI\'s own Write tool', async () => {
+    const { harness, fixture } = await realHarness(workspace => [
+      { kind: 'toolUse', name: 'Write', input: { file_path: join(workspace, 'marker.txt'), content: 'WROTE' } },
+      { kind: 'complete', text: 'created the file' },
+    ])
+    const run = await startRequest(harness, 'Create marker.txt.', undefined, 'workspace-write')
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'created the file' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    expect(existsSync(join(harness.workspace, 'marker.txt'))).toBe(true)
+    expect(readFileSync(join(harness.workspace, 'marker.txt'), 'utf8')).toBe('WROTE')
+    expect(fixture.requests).toHaveLength(2)
     await expectQuiescent(harness.handles)
   })
 })

@@ -13,6 +13,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   settleRunResult,
   subprocessRunHandle,
+  type SubagentPermissionMode,
   type SubagentResult,
   type SubagentRun,
   type SubagentStartRequest,
@@ -45,6 +46,14 @@ export function codexAppServerArgv(
 export interface CodexRunSpec {
   /** Parent Session workspace, also supplied to `thread/start`. */
   readonly cwd: string
+  /**
+   * Permission scope fixed for this child, resolved from
+   * `SubagentStartRequest.permissionMode` (already defaulted to `read-only` by
+   * the provider). Maps to `thread/start`'s `sandbox` alongside a pinned
+   * `approvalPolicy: 'never'` so approval prompts never depend on the host's
+   * own `~/.codex/config.toml`.
+   */
+  readonly permissionMode: SubagentPermissionMode
   /** Explicit deployment/test environment layered after the shared scrub. */
   readonly env: Record<string, string>
   /** Subprocess termination grace passed to the shared process-tree owner. */
@@ -159,7 +168,7 @@ export async function startCodexRun(
   try {
     wire.start()
     await Promise.race([wire.initialize(request.signal), processFailure])
-    await Promise.race([wire.startThread(spec.cwd, request.signal), processFailure])
+    await Promise.race([wire.startThread(spec.cwd, spec.permissionMode, request.signal), processFailure])
   } catch (error: unknown) {
     request.signal.removeEventListener('abort', onAbort)
     try {

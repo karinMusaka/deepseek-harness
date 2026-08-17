@@ -46,7 +46,11 @@ type ResolvedConfig = Required<Config>
 
 class CodexProvider implements SubagentProvider {
   readonly name = 'codex'
-  readonly capabilities: SubagentCapabilities = NO_START_CAPABILITIES
+  // Every other start-time capability stays NO_START_CAPABILITIES's `false`: an
+  // out-of-process app-server child cannot honor `outputSchema`/`maxDepth`/
+  // `toolFilter`/`persona`. `permissionMode` is the one exception — the
+  // official app-server's own `sandbox`/`approvalPolicy` enforce it natively.
+  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true }
   readonly inheritsParentContext = false
 
   constructor(
@@ -67,6 +71,9 @@ class CodexProvider implements SubagentProvider {
         undefined,
         parentCwd,
       ),
+      // Absent means the provider's own default (`SubagentStartRequest.permissionMode` JSDoc):
+      // fixed here as `read-only`, never left to the app-server's own config.toml.
+      permissionMode: request.permissionMode ?? 'read-only',
       env: this.config.env,
       disposeGraceMs: this.config.disposeGraceMs,
       spawn: spawnSpec => this.ctx.subprocess.spawn(spawnSpec),

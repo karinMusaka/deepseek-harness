@@ -4,6 +4,12 @@ import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'nod
 export type MessagesBehavior =
   | { readonly kind: 'complete'; readonly text: string }
   | { readonly kind: 'hold' }
+  | {
+    readonly kind: 'toolUse'
+    readonly name: string
+    readonly input: Record<string, unknown>
+    readonly id?: string
+  }
 
 /** One recorded Anthropic Messages request. */
 interface RecordedMessagesRequest {
@@ -82,13 +88,74 @@ function complete(
 }
 
 /**
+ * Emit a single `tool_use` content block instead of text, so the real Claude
+ * Code CLI actually invokes the named tool through its own permission
+ * pipeline (`canUseTool`, then real execution) rather than only reporting
+ * that it would.
+ */
+function toolUse(
+  response: ServerResponse,
+  body: Record<string, unknown>,
+  name: string,
+  input: Record<string, unknown>,
+  id: string,
+): void {
+  const model = typeof body.model === 'string' ? body.model : 'fixture-model'
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  event(response, 'message_start', {
+    type: 'message_start',
+    message: {
+      id: 'msg_dsh_fixture_tool',
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: 7,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  })
+  event(response, 'content_block_start', {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'tool_use', id, name, input: {} },
+  })
+  event(response, 'content_block_delta', {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) },
+  })
+  event(response, 'content_block_stop', {
+    type: 'content_block_stop',
+    index: 0,
+  })
+  event(response, 'message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: 'tool_use', stop_sequence: null },
+    usage: { output_tokens: 5 },
+  })
+  event(response, 'message_stop', { type: 'message_stop' })
+  response.end()
+}
+
+/**
  * Start a loopback-only Anthropic Messages SSE fixture.
- * @param behavior - the single response behavior for this fixture.
+ * @param script - one behavior per expected Messages request, consumed in order.
  * @returns the bound server and its recorded requests.
  */
 export async function startMessagesFixture(
-  behavior: MessagesBehavior,
+  script: readonly MessagesBehavior[],
 ): Promise<MessagesFixture> {
+  const behaviors = [...script]
   const requests: RecordedMessagesRequest[] = []
   let requestStartedResolve!: () => void
   const requestStarted = new Promise<void>((resolve) => {
@@ -116,8 +183,19 @@ export async function startMessagesFixture(
         body,
       })
       requestStartedResolve()
+      const behavior = behaviors.shift()
+      if (behavior === undefined) {
+        response.writeHead(500, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({
+          type: 'error',
+          error: { type: 'api_error', message: 'fixture script exhausted' },
+        }))
+        return
+      }
       if (behavior.kind === 'complete') {
         complete(response, body, behavior.text)
+      } else if (behavior.kind === 'toolUse') {
+        toolUse(response, body, behavior.name, behavior.input, behavior.id ?? 'toolu_dsh_fixture')
       }
       // A hold deliberately leaves the response pending until client abort.
     })

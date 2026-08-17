@@ -248,6 +248,7 @@ function fakeRun(
   const options: FakeRun['options'] = []
   const spec: ClaudeCodeRunSpec = {
     cwd: '/workspace',
+    permissionMode: 'read-only',
     executable: '/native/claude',
     env: { ANTHROPIC_API_KEY: 'fake-key' },
     disposeGraceMs: 5,
@@ -306,6 +307,7 @@ describe('task admission and package contracts', () => {
         depthLimit: false,
         toolFilter: false,
         persona: false,
+        permissionMode: true,
       },
       inheritsParentContext: false,
     })
@@ -539,6 +541,7 @@ describe('query options and result mapping', () => {
     const captured: SubprocessHandle[] = []
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
+      permissionMode: 'read-only',
       executable: '/native/claude',
       env: {
         HOST_VISIBLE: 'overridden',
@@ -557,8 +560,15 @@ describe('query options and result mapping', () => {
       cwd: '/workspace',
       pathToClaudeCodeExecutable: '/native/claude',
       persistSession: false,
+      // Fixed at delegation, never left to the host's own Claude settings
+      // (see the Agent Note): filesystem settings sources disabled and the
+      // permission mode pinned so a read-only/workspace-write scope is the
+      // only thing `canUseTool` has to enforce.
+      settingSources: [],
+      permissionMode: 'default',
       disallowedTools: ['AskUserQuestion'],
     })
+    expect(options.canUseTool).toBeTypeOf('function')
     expect(options.env).toMatchObject({
       HOST_VISIBLE: 'overridden',
       ANTHROPIC_API_KEY: 'explicit-fake-key',
@@ -566,8 +576,6 @@ describe('query options and result mapping', () => {
     expect(options.env).not.toHaveProperty('HOST_SECRET_TOKEN')
     expect(options.env).not.toHaveProperty('DSH_INTERNAL')
     for (const omitted of [
-      'settingSources',
-      'canUseTool',
       'onElicitation',
       'onUserDialog',
       'supportedDialogKinds',
@@ -583,6 +591,46 @@ describe('query options and result mapping', () => {
       cwd: '/workspace',
       graceMs: 17,
     }))
+  })
+
+  it.each([
+    ['read-only', 'Read', true],
+    ['read-only', 'Glob', true],
+    ['read-only', 'Grep', true],
+    ['read-only', 'WebFetch', true],
+    ['read-only', 'WebSearch', true],
+    ['read-only', 'Write', false],
+    ['read-only', 'Bash', false],
+    ['read-only', 'Task', false],
+    ['workspace-write', 'Read', true],
+    ['workspace-write', 'Write', true],
+    ['workspace-write', 'Edit', true],
+    ['workspace-write', 'NotebookEdit', true],
+    ['workspace-write', 'Bash', true],
+    ['workspace-write', 'Task', false],
+  ] as const)('canUseTool under %s: %s allowed=%s', async (
+    permissionMode: 'read-only' | 'workspace-write',
+    toolName: string,
+    allowed: boolean,
+  ) => {
+    const spec: ClaudeCodeRunSpec = {
+      cwd: '/workspace',
+      permissionMode,
+      executable: '/native/claude',
+      env: {},
+      disposeGraceMs: 5,
+      spawn: () => fakeChild().handle,
+    }
+    const options = claudeQueryOptions(spec, new AbortController(), () => {})
+    const decision = await options.canUseTool!(toolName, {}, {
+      signal: new AbortController().signal,
+      toolUseID: 'tool-use-1',
+      requestId: 'request-1',
+    })
+    expect(decision?.behavior).toBe(allowed ? 'allow' : 'deny')
+    if (!allowed && decision?.behavior === 'deny') {
+      expect(decision.message).toContain(permissionMode)
+    }
   })
 
   it('accepts only a non-error success with a non-blank final result', () => {
@@ -703,6 +751,7 @@ describe('run publication, cancellation, and settlement', () => {
     let index = 0
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
+      permissionMode: 'read-only',
       executable: '/native/claude',
       env: {},
       disposeGraceMs: 5,
@@ -754,6 +803,7 @@ describe('run publication, cancellation, and settlement', () => {
       request(undefined, parentAbort.signal),
       {
         cwd: '/workspace',
+        permissionMode: 'read-only',
         executable: '/native/claude',
         env: {},
         disposeGraceMs: 5,

@@ -173,7 +173,14 @@ describe('real @openai/codex 0.147.0 product', () => {
     await expectQuiescent(harness.handles)
   }, 60_000)
 
-  it('cancels a real app-server command approval without executing the command', async () => {
+  it('rejects an escalated command outright under the pinned never approval policy, without executing it', async () => {
+    // Fixed `approvalPolicy: 'never'` (never left to the host's
+    // `~/.codex/config.toml`) means codex-core itself rejects a command that
+    // requires escalated permissions before ever asking the client — the
+    // wire's own approval-decline handling (`unattendedDecision`, covered at
+    // the protocol level in subagent-codex.spec.ts) is unreached on this path.
+    // A second scripted turn lets the run settle immediately instead of
+    // retrying against an exhausted fixture script.
     const command = process.platform === 'win32'
       ? 'cmd /c type nul > approval-side-effect'
       : 'touch approval-side-effect'
@@ -195,11 +202,13 @@ describe('real @openai/codex 0.147.0 product', () => {
         },
       },
     ] as const
+    const acknowledgement = 'acknowledged: the command was rejected'
     const { harness, fixture } = await realHarness([
       {
         kind: 'advertisedFunctionCall',
         choices: commandCalls,
       },
+      { kind: 'complete', text: acknowledgement },
     ])
     const sideEffect = join(harness.workspace, 'approval-side-effect')
     const run = await harness.ctx.subagents.start('codex', {
@@ -208,17 +217,23 @@ describe('real @openai/codex 0.147.0 product', () => {
       signal: new AbortController().signal,
     })
     await expect(run.result).resolves.toEqual({
-      output: [],
-      stopReason: 'error',
+      output: [{ type: 'text', text: acknowledgement }],
+      stopReason: 'completed',
     })
     await run.dispose()
 
+    // Verify the world, not the model's self-report: the command never ran.
     expect(existsSync(sideEffect)).toBe(false)
-    expect(fixture.requests).toHaveLength(1)
+    expect(fixture.requests).toHaveLength(2)
     const tools = fixture.requests[0]!.body.tools as Array<Record<string, unknown>>
     expect(commandCalls.some(call => tools.some(tool => (
       tool.type === 'function' && tool.name === call.name
     )))).toBe(true)
+    // The rejection reaches the model as the function's own output — codex-core
+    // rejected it before the app-server ever asked this provider for a decision.
+    expect(JSON.stringify(fixture.requests[1]!.body)).toContain(
+      'approval policy is Never; reject command',
+    )
     expect(fixture.requests.every(requestEntry =>
       requestEntry.headers.authorization === 'Bearer dsh-fake-openai-key',
     )).toBe(true)
@@ -237,6 +252,95 @@ describe('real @openai/codex 0.147.0 product', () => {
     controller.abort(new Error('real product cancellation'))
     await expect(run.result).resolves.toMatchObject({ stopReason: 'aborted' })
     await run.dispose()
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+})
+
+/** Shell/exec function-call choices real codex advertises for a plain (non-escalated) command. */
+function shellCallChoices(command: string): readonly { name: string; arguments: Record<string, unknown> }[] {
+  return [
+    { name: 'exec_command', arguments: { cmd: command } },
+    { name: 'shell_command', arguments: { command } },
+  ] as const
+}
+
+describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', () => {
+  it('a read-only child can read a file through the real sandboxed shell', async () => {
+    const sentinel = 'REAL_CODEX_READ_ONLY_READ_SENTINEL'
+    const { harness, fixture } = await realHarness([
+      { kind: 'advertisedFunctionCall', choices: shellCallChoices('cat probe.txt') },
+      { kind: 'complete', text: 'read the probe file' },
+    ])
+    writeFileSync(join(harness.workspace, 'probe.txt'), sentinel)
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Read probe.txt and report it.' }],
+      parent: harness.parent,
+      permissionMode: 'read-only',
+      signal: new AbortController().signal,
+    })
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'read the probe file' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    expect(fixture.requests).toHaveLength(2)
+    // The real sandboxed shell actually ran `cat`; its output crosses back to
+    // the model as the function's own result, not the model's self-report.
+    expect(JSON.stringify(fixture.requests[1]!.body)).toContain(sentinel)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('a read-only child cannot create a file — the real OS sandbox blocks a plain (non-escalated) shell write', async () => {
+    const { harness, fixture } = await realHarness([
+      { kind: 'advertisedFunctionCall', choices: shellCallChoices('printf WROTE > marker.txt') },
+      { kind: 'complete', text: 'attempted the write' },
+    ])
+    const marker = join(harness.workspace, 'marker.txt')
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Create marker.txt.' }],
+      parent: harness.parent,
+      permissionMode: 'read-only',
+      signal: new AbortController().signal,
+    })
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'attempted the write' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    // Verify the world, not the model's self-report: the file was never created.
+    expect(existsSync(marker)).toBe(false)
+    expect(fixture.requests).toHaveLength(2)
+    // `sandbox: 'read-only'` on `thread/start` blocks the write at the OS
+    // level (seatbelt/landlock) — no approval ask, and no per-tool-name
+    // bypass exists in codex's shell surface the way `Bash` bypassed a
+    // Claude Code `disallowedTools` denylist (see the Agent Note).
+    expect(JSON.stringify(fixture.requests[1]!.body)).toContain('operation not permitted')
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('a workspace-write child can create a file inside its own working directory', async () => {
+    const { harness, fixture } = await realHarness([
+      { kind: 'advertisedFunctionCall', choices: shellCallChoices('printf WROTE > marker.txt') },
+      { kind: 'complete', text: 'created the file' },
+    ])
+    const marker = join(harness.workspace, 'marker.txt')
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Create marker.txt.' }],
+      parent: harness.parent,
+      permissionMode: 'workspace-write',
+      signal: new AbortController().signal,
+    })
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'created the file' }],
+      stopReason: 'completed',
+    })
+    await run.dispose()
+
+    expect(existsSync(marker)).toBe(true)
+    expect(readFileSync(marker, 'utf8')).toBe('WROTE')
+    expect(fixture.requests).toHaveLength(2)
     await expectQuiescent(harness.handles)
   }, 60_000)
 })

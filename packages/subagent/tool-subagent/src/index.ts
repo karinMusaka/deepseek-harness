@@ -15,7 +15,7 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import { assertSubagentMaxDepth, settleRun } from '@deepseek-ai/dsh-subagent'
-import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentPermissionMode, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
@@ -76,6 +76,18 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Fixed permission scope for every child this tool instance starts.
+   * Requires the provider's `permissionMode` capability (mount fails loud
+   * otherwise); omission leaves the provider's own default (every provider
+   * defines that default as `read-only`), so `spawn`/`fork`/`acp`/`dsh-sdk`
+   * compositions that never set this field are unaffected. `read-only`
+   * forbids every write-capable operation; `workspace-write` confines writes
+   * to the child's working directory. This is deployment configuration, never
+   * a model-facing tool argument — a permission-widening decision belongs to
+   * whoever writes the composition, not the delegating model.
+   */
+  permissionMode?: SubagentPermissionMode
 }
 
 export const Config: z<Config> = z.object({
@@ -96,6 +108,10 @@ export const Config: z<Config> = z.object({
     deny: z.array(z.string()).default(undefined as unknown as string[]),
   }).default(undefined as unknown as { allow: string[]; deny: string[] }),
   maxDepth: z.union([z.natural().max(Number.MAX_SAFE_INTEGER), z.const('provider-managed' as const)]).default(3),
+  // No `.default(...)`: preserve omission (the `persona` idiom above) so a
+  // provider without the `permissionMode` capability is unaffected unless the
+  // deployer explicitly configures this field.
+  permissionMode: z.union(['read-only', 'workspace-write'] as const),
 })
 
 /** Render text blocks from the canonical JSON block array without trusting arbitrary values. */
@@ -288,6 +304,15 @@ export function apply(ctx: Context, config: Config): void {
         + 'set maxDepth: \'provider-managed\' to leave the recursion budget to the provider',
       )
     }
+    // Configured only when the deployer explicitly names a scope; omission
+    // never reaches this check, so it never fires for a plain `spawn`/`fork`
+    // composition that leaves the provider's own default in place.
+    if (config.permissionMode !== undefined && !provider.capabilities.permissionMode) {
+      throw new Error(
+        `tool-subagent: provider "${provider.name}" cannot enforce permissionMode (no permissionMode capability) — `
+        + 'remove the key to leave the provider\'s own default in place',
+      )
+    }
     const wording = providerWording(provider.inheritsParentContext)
     if (continuable && provider.prepareContinuable === undefined) {
       throw new Error(
@@ -382,6 +407,7 @@ export function apply(ctx: Context, config: Config): void {
           ...config.persona !== undefined ? { persona: config.persona } : {},
           ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
           ...maxDepth !== undefined ? { maxDepth } : {},
+          ...config.permissionMode !== undefined ? { permissionMode: config.permissionMode } : {},
         }
 
         const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })

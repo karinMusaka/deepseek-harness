@@ -140,11 +140,19 @@ function resolveCwd(configured: string | undefined, request: SubagentStartReques
 
 /**
  * The ACP provider. Advertises NO start-time capabilities: an out-of-process
- * child cannot honor `outputSchema`/`maxDepth`/`toolFilter` (the service rejects
- * a request needing any of them before `start` runs).
+ * child cannot honor `outputSchema`/`maxDepth`/`toolFilter`/`permissionMode`
+ * (the service rejects a request needing any of them before `start` runs).
+ * This provider keeps its own explicit machine `permission` policy (see
+ * {@link PermissionPolicy}) rather than the seam's `permissionMode`.
  */
 class AcpProvider implements SubagentProvider {
-  readonly capabilities: SubagentCapabilities = { outputSchema: false, depthLimit: false, toolFilter: false, persona: false }
+  readonly capabilities: SubagentCapabilities = {
+    outputSchema: false,
+    depthLimit: false,
+    toolFilter: false,
+    persona: false,
+    permissionMode: false,
+  }
   // Context contract: an out-of-process ACP child starts fresh — no parent conversation crosses the process boundary.
   readonly inheritsParentContext = false
 

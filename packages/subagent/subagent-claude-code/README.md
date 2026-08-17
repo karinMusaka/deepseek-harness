@@ -12,15 +12,17 @@ The SDK receives the exact concatenated text task. The provider iterates the com
 
 Local cancellation wins the result race and maps to `aborted`. `dispose()` is idempotent: it aborts the run, asks the SDK query to close, invokes the shared process-tree termination escalation, and waits for whole-tree exit. SDK graceful close expresses protocol intent; the subprocess handle remains the authority for process quiescence. Result failure and independent teardown failure remain separate.
 
-## Native settings and interaction
+## Native settings and permission scope
 
-The provider deliberately omits the SDK `settingSources` option. The official SDK therefore reads the host's normal user, project, and local Claude settings relative to the parent Session cwd, including native account state and product configuration. The provider neither copies nor filters those files and does not create or modify login state.
+Every query sets `settingSources: []`. The official SDK therefore does **not** read the host's user, project, or local Claude settings, CLAUDE.md, or MCP server configuration — the child's world is fixed entirely at delegation, so the same delegation behaves identically regardless of drift in the host's own Claude configuration. Login/account state and network authentication remain native (this option controls filesystem settings, not authentication); the provider neither copies nor filters those files and does not create or modify login state.
 
-Each query sets `persistSession: false` and disables `AskUserQuestion`. It supplies no `canUseTool`, elicitation, or dialog callback, so unattended interactions fail through the SDK instead of waiting for a user interface this provider does not own.
+Each query also sets `permissionMode: 'default'` and a fixed `canUseTool` enforcing `request.permissionMode` (absent means `read-only`, the seam's documented provider default): a default-deny allowlist of read-only tool names (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`) for `read-only`, extended with `Write`, `Edit`, `NotebookEdit`, and `Bash` for `workspace-write`. This is an allowlist, not a denylist — a tool this pin does not yet enumerate (a future SDK addition, or a version drift between the pinned SDK and the installed CLI) stays denied instead of failing open. `disallowedTools: ['AskUserQuestion']` remains unconditional in both modes.
+
+Each query sets `persistSession: false`. It supplies no elicitation or dialog callback, so an unattended interaction outside the fixed allowlist fails through a `canUseTool` denial instead of waiting for a user interface this provider does not own.
 
 ## Capabilities and context
 
-The provider advertises no optional start-time capabilities and reports `inheritsParentContext: false`. Claude Code receives the standalone text task and the parent Session cwd, but not the parent conversation, persona, tool filter, depth policy, or structured-output contract. Every run has an independent SDK query, cancellation controller, CLI process, and non-persisted product session.
+The provider advertises the `permissionMode` start-time capability (enforced as above) and no other optional capability; it reports `inheritsParentContext: false`. Claude Code receives the standalone text task, the parent Session cwd, and the fixed permission scope, but not the parent conversation, persona, tool filter, depth policy, or structured-output contract. Every run has an independent SDK query, cancellation controller, CLI process, and non-persisted product session.
 
 ## Configuration
 
@@ -62,7 +64,7 @@ The project owner's identity-scoped distribution authorization covers the offici
 
 #### What the model sees
 
-The Claude Code child receives the standalone text task as one fresh SDK query. Its workspace is the parent Session cwd, while its model, system instructions, tools, permissions, and authentication come from the host's native Claude settings and product installation.
+The Claude Code child receives the standalone text task as one fresh SDK query. Its workspace is the parent Session cwd and its permission scope is fixed at delegation (`read-only` unless the deployment configures `workspace-write`); its model, system instructions, and native authentication come from the SDK's own defaults and the host's product installation, not the host's filesystem settings (`settingSources: []`).
 
 #### Token effect
 
@@ -89,10 +91,10 @@ Append-only: the new tool result follows the reusable parent request prefix.
 ## Known Limitations and Deferred Work
 
 - **One fresh query and process per run** — there is no continuation, resume, pooling, progress stream, or product-session persistence.
-- **Host settings are intentionally authoritative** — project and user settings can change model, tools, and behavior; the provider does not provide a filtered or hermetic production mode.
+- **`workspace-write` is an allowlist broadening, not OS path confinement** — unlike the `codex` sibling's `sandbox: 'workspace-write'` (an OS-level seatbelt/landlock boundary), this provider's `workspace-write` only widens the fixed tool-name allowlist; a `Write`/`Edit`/`Bash` call the model issues can still target a path outside the child's own working directory if the real CLI's own tool implementation permits it. The seam's `permissionMode` JSDoc describes the confining case; here it is a closer approximation than a proof.
 - **Product installation and account state remain native** — a missing or incompatible `claude`, configuration error, or authentication failure is surfaced as a startup or run error; the plugin provides no installer or login flow.
 - **The SDK platform CLI remains in the install closure** — production ignores it in favor of the host `claude`, but the current SDK optional dependency is still installed and supplies the keyless compatibility fixture. Removing that payload belongs to the separate product installation-closure follow-up.
 - **No human interaction path** — `AskUserQuestion` is disabled and other interactive callbacks are absent, so tasks requiring new approval or input fail instead of suspending.
 - **Final text only** — reasoning, intermediate messages, tool traffic, usage, stderr, and workspace diffs remain product-local.
-- **No optional shared capabilities** — output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
+- **No optional shared capability besides `permissionMode`** — output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
 - **No wall-clock timeout or side-effect rollback** — the caller cancels long work, and files or external systems changed before cancellation are not restored.

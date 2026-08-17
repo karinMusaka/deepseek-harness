@@ -2649,10 +2649,22 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Fixed permission scope for every child this tool instance starts.
+   * Requires the provider's `permissionMode` capability (mount fails loud
+   * otherwise); omission leaves the provider's own default (every provider
+   * defines that default as `read-only`), so `spawn`/`fork`/`acp`/`dsh-sdk`
+   * compositions that never set this field are unaffected. `read-only`
+   * forbids every write-capable operation; `workspace-write` confines writes
+   * to the child's working directory. This is deployment configuration, never
+   * a model-facing tool argument — a permission-widening decision belongs to
+   * whoever writes the composition, not the delegating model.
+   */
+  permissionMode?: SubagentPermissionMode
 }
 ```
 
-依赖：[`AgentOptions`](subsystems/core.md)
+依赖：[`AgentOptions`](subsystems/core.md) · [`SubagentPermissionMode`](../packages/subagent/subagent/src/index.ts)
 
 来源：[`packages/subagent/tool-subagent/src/index.ts:29`](../packages/subagent/tool-subagent/src/index.ts)
 

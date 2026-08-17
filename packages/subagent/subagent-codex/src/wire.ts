@@ -9,8 +9,27 @@
 
 import type { Readable, Writable } from 'node:stream'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+import { assertNever } from '@deepseek-ai/dsh-llm'
+import type { SubagentPermissionMode, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
+
+/**
+ * Map the seam's closed permission vocabulary to the app-server's `sandbox`
+ * enum.
+ * @param permissionMode - the child's fixed permission scope.
+ * @returns the app-server `ThreadStartParams.sandbox` value.
+ */
+function codexSandbox(permissionMode: SubagentPermissionMode): 'read-only' | 'workspace-write' {
+  switch (permissionMode) {
+    case 'read-only':
+      return 'read-only'
+    case 'workspace-write':
+      return 'workspace-write'
+    /* v8 ignore next 2 -- closed-union exhaustiveness guard */
+    default:
+      return assertNever(permissionMode, 'codexSandbox')
+  }
+}
 
 type JsonObject = Record<string, unknown>
 
@@ -146,14 +165,21 @@ export class CodexAppServerWire {
   }
 
   /**
-   * Create the run's private ephemeral thread and retain its identity.
+   * Create the run's private ephemeral thread and retain its identity. Pins
+   * `sandbox` from the fixed delegation-time permission scope and
+   * `approvalPolicy: 'never'` explicitly, rather than inheriting whatever
+   * `~/.codex/config.toml` the host happens to have (both are non-experimental
+   * app-server 0.147.0 parameters).
    * @param cwd - parent Session workspace.
+   * @param permissionMode - the child's fixed permission scope, mapped to `sandbox`.
    * @param signal - unpublished-start cancellation.
    */
-  async startThread(cwd: string, signal: AbortSignal): Promise<void> {
+  async startThread(cwd: string, permissionMode: SubagentPermissionMode, signal: AbortSignal): Promise<void> {
     const response = object(await this.guarded(this.transport.request('thread/start', {
       cwd,
       ephemeral: true,
+      sandbox: codexSandbox(permissionMode),
+      approvalPolicy: 'never',
     }, signal), signal), 'thread/start response')
     const thread = object(response.thread, 'thread/start thread')
     const id = string(thread.id, 'thread/start thread id')

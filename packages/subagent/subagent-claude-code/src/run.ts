@@ -9,17 +9,21 @@
 import { randomUUID } from 'node:crypto'
 import {
   query as officialQuery,
+  type CanUseTool,
   type Options,
+  type PermissionResult,
   type Query,
   type SDKMessage,
   type SDKResultMessage,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk'
+import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   settleRunResult,
   subprocessRunHandle,
+  type SubagentPermissionMode,
   type SubagentResult,
   type SubagentRun,
   type SubagentStartRequest,
@@ -44,6 +48,12 @@ export const DEFAULT_DISPOSE_GRACE_MS = 3_000
 export interface ClaudeCodeRunSpec {
   /** Parent Session workspace supplied to the SDK and real CLI. */
   readonly cwd: string
+  /**
+   * Permission scope fixed for this child, resolved from
+   * `SubagentStartRequest.permissionMode` (already defaulted to `read-only` by
+   * the provider). Enforced by {@link fixedCanUseTool}'s allowlist.
+   */
+  readonly permissionMode: SubagentPermissionMode
   /** Exact native Claude Code executable resolved from the host PATH. */
   readonly executable: string
   /** Explicit deployment/test environment layered after shared scrubbing. */
@@ -168,11 +178,66 @@ export async function disposeClaudeCodeChild(
 }
 
 /**
+ * Read-only tool names, verified against the pinned SDK's `sdk-tools.d.ts`
+ * tool input interfaces (`FileReadInput` → `Read`, `GlobInput` → `Glob`,
+ * `GrepInput` → `Grep`, `WebFetchInput` → `WebFetch`, `WebSearchInput` →
+ * `WebSearch`). An allowlist, not a denylist: a denied `Write` attempt was
+ * observed routing around `disallowedTools` through `Bash` in the same run
+ * (see the Agent Note), so an unlisted tool — including one this pin does not
+ * yet know about — stays denied by default instead of failing open.
+ */
+const READ_ONLY_ALLOWED_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
+
+/** `read-only`'s allowlist plus the write-capable tools `workspace-write` admits. */
+const WORKSPACE_WRITE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+  ...READ_ONLY_ALLOWED_TOOLS,
+  'Write',
+  'Edit',
+  'NotebookEdit',
+  'Bash',
+])
+
+/** Resolve the fixed allowlist for one permission scope. */
+function allowedToolsFor(permissionMode: SubagentPermissionMode): ReadonlySet<string> {
+  switch (permissionMode) {
+    case 'read-only':
+      return READ_ONLY_ALLOWED_TOOLS
+    case 'workspace-write':
+      return WORKSPACE_WRITE_ALLOWED_TOOLS
+    /* v8 ignore next 2 -- closed-union exhaustiveness guard */
+    default:
+      return assertNever(permissionMode, 'allowedToolsFor')
+  }
+}
+
+/**
+ * Build the fixed `canUseTool` enforcing one permission scope: default DENY,
+ * allow only the scope's fixed tool-name allowlist. Requires
+ * `settingSources: []` in the same {@link Options} — without it, a host
+ * Claude settings file that pre-approves a tool skips the permission decision
+ * entirely and this callback is never invoked (see the Agent Note).
+ * @param permissionMode - the child's fixed permission scope.
+ * @returns the SDK `canUseTool` callback.
+ */
+function fixedCanUseTool(permissionMode: SubagentPermissionMode): CanUseTool {
+  const allowed = allowedToolsFor(permissionMode)
+  return (toolName: string): Promise<PermissionResult> => Promise.resolve(
+    allowed.has(toolName)
+      ? { behavior: 'allow' }
+      : {
+        behavior: 'deny',
+        message: `subagent-claude-code: "${toolName}" is outside the delegated child's fixed "${permissionMode}" permission scope`,
+      },
+  )
+}
+
+/**
  * Build the fixed official SDK options for one one-shot provider run.
  * @param spec - Workspace, environment, process service, and disposal policy.
  * @param controller - per-run cancellation owner.
  * @param capture - receives the real managed child synchronously from the SDK hook.
- * @returns options that inherit native settings while disabling persistence and user questions.
+ * @returns options that inherit native settings while disabling persistence, user
+ *   questions, and host settings, and enforcing the fixed permission scope.
  */
 export function claudeQueryOptions(
   spec: ClaudeCodeRunSpec,
@@ -185,7 +250,13 @@ export function claudeQueryOptions(
     pathToClaudeCodeExecutable: spec.executable,
     env: { ...scrubbedParentEnv(), ...spec.env },
     persistSession: false,
+    // The child's world is fixed at delegation: host CLAUDE.md, MCP servers,
+    // and permission pre-approvals from `~/.claude/settings.json` and project
+    // settings must never leak in and drift what an identical delegation does.
+    settingSources: [],
+    permissionMode: 'default',
     disallowedTools: ['AskUserQuestion'],
+    canUseTool: fixedCanUseTool(spec.permissionMode),
     spawnClaudeCodeProcess: (options: SpawnOptions) => {
       const child = spec.spawn(claudeSpawnSpec(options, spec.disposeGraceMs))
       capture(child)
