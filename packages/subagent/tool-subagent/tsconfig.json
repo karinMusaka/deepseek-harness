@@ -36,6 +36,9 @@
       "path": "../../jobs/jobs"
     },
     {
+      "path": "../../util/timeout"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

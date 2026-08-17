@@ -17,6 +17,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import { deadline } from '@deepseek-ai/dsh-timeout'
 import * as codex from '../src/index.ts'
 import {
   startResponsesFixture,
@@ -250,6 +251,30 @@ describe('real @openai/codex 0.147.0 product', () => {
     })
     await fixture.requestStarted
     controller.abort(new Error('real product cancellation'))
+    await expect(run.result).resolves.toMatchObject({ stopReason: 'aborted' })
+    await run.dispose()
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('settles a caller-owned wall-clock deadline exactly like a manual cancellation and leaves the tree quiescent', async () => {
+    // A consuming tool (dsh-tool-subagent's `timeoutSeconds`) composes its own
+    // deadline into `request.signal` — never a change to this provider. This
+    // proves that composed signal reaches real teardown to actual process
+    // exit (not just a requested kill) exactly like the manual-cancellation
+    // case above, using the same `dsh-timeout` deadline() the consuming tool
+    // uses, firing on a real elapsed timer instead of an explicit `abort()`.
+    const { harness, fixture } = await realHarness([{ kind: 'hold' }])
+    // Long enough that real app-server startup and the first held request
+    // reliably land before it elapses (proven by awaiting `requestStarted`
+    // below); short enough to keep the test fast. The deadline still owns the
+    // eventual abort — nothing here calls `abort()` explicitly.
+    using timeout = deadline(undefined, 1_500, 'REAL_PRODUCT_DEADLINE_TEST')
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Wait for the deadline to elapse.' }],
+      parent: harness.parent,
+      signal: timeout.signal,
+    })
+    await fixture.requestStarted
     await expect(run.result).resolves.toMatchObject({ stopReason: 'aborted' })
     await run.dispose()
     await expectQuiescent(harness.handles)

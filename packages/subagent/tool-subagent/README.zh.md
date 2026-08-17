@@ -16,6 +16,8 @@
 
 `permissionMode` 会为本工具实例发起的每一次委派固定子 agent 的权限范围；它是部署配置，绝不是模型可见的工具参数——模型无法为某一次调用请求更宽的范围。省略该键会保留提供方自身的默认值（对每个具备该能力的提供方而言均为 `read-only`）；显式设置该值则要求提供方具备 `permissionMode` 能力，缺失时挂载会失败。见[审批钉定 Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md)和[权限范围 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md)。
 
+`timeoutSeconds` 会以本实例自身的墙钟时间，限定一次前台调用与一次一次性后台调用——这两种运行都由本工具从头到尾拥有，因此其计时器不仅覆盖被等待的结果，也覆盖 `ctx.subagents.start()` 本身（例如启动期卡死的提供方，而不仅是结果挂起）。到期时，合成信号的中止方式与调用方取消完全相同，但前台工具结果会读作超时而非取消，而真正的调用方取消即便与已启动的计时器竞争，仍会读作取消。省略该键会保留现有行为：没有上限。将其与 `backgroundMode: 'continuable'` 一起配置会在加载期失败——可继续子 agent 的轮次在 inbox 接受之后归继续执行服务所有，而不属于本工具，因此这里没有可供计时器终止的运行。见[墙钟超时 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md)。
+
 ## 配置
 
 | 键 | 含义 |
@@ -29,6 +31,7 @@
 | `toolFilter` | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力。 |
 | `maxDepth` | 绝对委派深度上限，默认 `3`（`0` 禁止委派）；数值上限要求 `depthLimit` 能力，缺失时挂载失败。对于预算由子 harness 拥有的进程外提供方，`'provider-managed'` 不发送上限。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。 |
 | `permissionMode` | 固定的子 agent 权限范围（`'read-only'` \| `'workspace-write'`）；要求 `permissionMode` 能力，缺失时挂载失败。省略则保留提供方自身的默认值（`read-only`）。模型永远不可见——仅是部署方的选择。 |
+| `timeoutSeconds` | 本实例自身前台运行与一次性后台运行的墙钟上限（秒）；必须是正的有限数，且换算为毫秒后不超过 `MAX_TIMER_DELAY_MS`（`@deepseek-ai/dsh-timeout`）。省略则不设上限（现有行为）；不会具体化 Schemastery 默认值，因此现有的 `spawn`／`fork` 组合在部署方主动启用之前不受影响。与 `backgroundMode: 'continuable'` 一起配置会在加载期失败。 |
 
 ## 并发
 
@@ -54,7 +57,7 @@
 
 #### 模型看到的内容
 
-调用会保留描述和提示词。成功时只包含子 agent 的最终文本；其他结果变为 `Error: <message>`。子 agent 中间步骤不会进入父级。
+调用会保留描述和提示词。成功时只包含子 agent 的最终文本；其他结果变为 `Error: <message>`。子 agent 中间步骤不会进入父级。若配置的 `timeoutSeconds` 终止了运行，结果会读作 `Error: subagent run hit its <N>s time limit before finishing`（外加任何保留下来的部分文本）——与调用方取消的消息 `Error: subagent run was cancelled` 不同，因此模型不会把两者混淆。
 
 #### Token 影响
 
@@ -83,3 +86,4 @@
 - **后台运行不通过本工具公开结果**：一次性任务的最终输出通过通用 Task 接口收集，可继续子 agent 的输出留在其自身会话中，按其 subagent id 读取。结算通知会说明该子 agent 如何结束，并携带可能存在的最终 assistant 消息，但它不是本次调用的返回值，也无法在此等待。
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）：可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
 - **每个实例的子 agent 策略固定**：其他模型、persona、工具过滤器或深度上限都需要另一个名称不同的工具。
+- **一次性后台运行的超时对通用 Task 接口不可见**——`job_output`／结算通知会把超时的一次性子 agent 报告得与被 `job_kill` 终止的子 agent一模一样（`[status: killed]`）；只有前台路径的工具结果会把超时单独标出。为共享的 `JobOutcome` 增加这项区分被推迟；见[墙钟超时 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md)。

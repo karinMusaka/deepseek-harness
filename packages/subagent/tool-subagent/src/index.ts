@@ -14,10 +14,29 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { assertSubagentMaxDepth, settleRun } from '@deepseek-ai/dsh-subagent'
+import { assertPositiveFinite, assertSubagentMaxDepth, settleRun } from '@deepseek-ai/dsh-subagent'
 import type { SubagentPermissionMode, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import { deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+
+/**
+ * Capability-owned code stamped on this tool's own {@link deadline} timer so
+ * {@link timeoutOf} can tell its expiry apart from an outer cancellation that
+ * happens to reach the same composed signal.
+ */
+const SUBAGENT_TIMEOUT_CODE = 'SUBAGENT_TIMEOUT'
+
+/**
+ * Model-facing headline for a run this tool's own timer stopped, phrased from
+ * the model's perspective (no timer/signal/abort vocabulary) and mirroring
+ * the sibling `max-tokens` headline in {@link stopReasonError}.
+ * @param timeoutMs - the elapsed timer bound, in milliseconds.
+ * @returns the stop-reason headline naming the configured limit in seconds.
+ */
+function timeoutHeadline(timeoutMs: number): string {
+  return `subagent run hit its ${timeoutMs / 1000}s time limit before finishing`
+}
 
 export const name = 'tool-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt']
@@ -88,6 +107,20 @@ export interface Config {
    * whoever writes the composition, not the delegating model.
    */
   permissionMode?: SubagentPermissionMode
+  /**
+   * Wall-clock cap, in seconds, on this instance's own runs: a positive
+   * finite number no greater than {@link MAX_TIMER_DELAY_MS} in milliseconds.
+   * Applies to a foreground call and a one-shot background call — both owned
+   * by this tool, which starts the timer before `ctx.subagents.start()` so a
+   * provider wedged during startup (an unauthenticated backend's slow retry
+   * loop, for example) is bounded too. Omission preserves today's behavior:
+   * no cap. Rejected at load with `backgroundMode: 'continuable'` — a
+   * continuable child's turns are owned by the continuation manager, not this
+   * tool, so there is no run here to time out. A caller's own cancellation
+   * (the tool call's `exec.signal`) is unaffected and still reports as
+   * cancelled, never as a timeout.
+   */
+  timeoutSeconds?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -112,6 +145,11 @@ export const Config: z<Config> = z.object({
   // provider without the `permissionMode` capability is unaffected unless the
   // deployer explicitly configures this field.
   permissionMode: z.union(['read-only', 'workspace-write'] as const),
+  // No `.default(...)`: PR1 learned this the hard way for `permissionMode` —
+  // a materialized default here would silently cut off every existing
+  // `spawn`/`fork` composition's long-running delegations. Omission stays
+  // `undefined` through the Loader, same as `persona`/`permissionMode` above.
+  timeoutSeconds: z.number(),
 })
 
 /** Render text blocks from the canonical JSON block array without trusting arbitrary values. */
@@ -135,13 +173,24 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
   }
 }
 
-/** A non-`completed` stop reason means the child did not finish cleanly. */
-function stopReasonError(result: SubagentResult): string | undefined {
+/**
+ * A non-`completed` stop reason means the child did not finish cleanly.
+ * @param result - the child's terminal result.
+ * @param deadlineSignal - this call's composed signal (`exec.signal` alone
+ *   when `timeoutSeconds` is omitted, per {@link deadline}'s identity
+ *   forwarding at `timeoutMs <= 0`). An `aborted` result carrying this tool's
+ *   own {@link SUBAGENT_TIMEOUT_CODE} reason is this instance's timer, not the
+ *   caller; every other `aborted` result — including a caller cancellation
+ *   racing an armed timer — reports as cancelled.
+ */
+function stopReasonError(result: SubagentResult, deadlineSignal: AbortSignal): string | undefined {
   switch (result.stopReason) {
     case 'completed':
       return undefined
-    case 'aborted':
-      return 'subagent run was cancelled'
+    case 'aborted': {
+      const timedOut = timeoutOf(deadlineSignal, SUBAGENT_TIMEOUT_CODE)
+      return timedOut !== undefined ? timeoutHeadline(timedOut.timeoutMs) : 'subagent run was cancelled'
+    }
     case 'error':
       return 'subagent run failed'
     case 'max-tokens':
@@ -179,11 +228,15 @@ type ForegroundToolResult = {
 /**
  * Collect and release one foreground run without letting disposal replace an
  * independent result failure.
+ * @param run - the published run to await and dispose.
+ * @param deadlineSignal - this call's composed signal, forwarded to
+ *   {@link stopReasonError} so a timeout reports distinctly from a caller
+ *   cancellation.
  */
-async function settleForegroundRun(run: SubagentRun): Promise<ForegroundToolResult> {
+async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal): Promise<ForegroundToolResult> {
   const [execution] = await Promise.allSettled([
     run.result.then((result): ForegroundToolResult => {
-      const error = stopReasonError(result)
+      const error = stopReasonError(result, deadlineSignal)
       if (error !== undefined) {
         // The registry converts this throw to isError; partial output is not
         // success, but the preserved partial answer still reaches the parent.
@@ -290,6 +343,26 @@ export function apply(ctx: Context, config: Config): void {
   }
   const backgroundEnabled = config.enableRunInBackground !== false
   const continuable = (config.backgroundMode ?? 'one-shot') === 'continuable'
+  // Direct apply() also bypasses the schema's `z.number()` type constraint
+  // (but not its `.default()`, since there is none): validate here so a
+  // misconfigured cap fails at load, the earliest resolvable point, instead
+  // of at the first delegation's `deadline()` call.
+  if (config.timeoutSeconds !== undefined) {
+    assertPositiveFinite('tool-subagent', 'timeoutSeconds', config.timeoutSeconds)
+    if (config.timeoutSeconds * 1000 > MAX_TIMER_DELAY_MS) {
+      throw new Error(`tool-subagent: timeoutSeconds must be no greater than ${MAX_TIMER_DELAY_MS / 1000} seconds`)
+    }
+    // A continuable child's turns are owned by the continuation manager after
+    // inbox acceptance, not this tool — there is no run here for a timer to
+    // stop. Config-vs-config, fully self-contained: fail at load like the
+    // empty-toolFilter check above, not at the first delegation.
+    if (continuable) {
+      throw new Error(
+        'tool-subagent: `timeoutSeconds` cannot be combined with `backgroundMode: \'continuable\'` — '
+        + 'a continuable child\'s turns are owned by the continuation manager, not this tool',
+      )
+    }
+  }
   const toolName = config.toolName ?? 'subagent'
   // Mirror provider lifecycle because sibling load order and HMR replacement
   // can change provider availability while this fiber remains active.
@@ -410,6 +483,11 @@ export function apply(ctx: Context, config: Config): void {
           ...config.permissionMode !== undefined ? { permissionMode: config.permissionMode } : {},
         }
 
+        // `timeoutMs <= 0` is `deadline()`'s own no-timer sentinel: an omitted
+        // `timeoutSeconds` forwards the upstream signal by identity, so the
+        // omitted-cap path never allocates a timer or a distinct signal.
+        const timeoutMs = config.timeoutSeconds !== undefined ? config.timeoutSeconds * 1000 : 0
+
         const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
         if (runSpec.runInBackground) {
           if (continuable) {
@@ -428,19 +506,24 @@ export function apply(ctx: Context, config: Config): void {
             throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
           }
           // One-shot background child: job preflight finishes before the
-          // starter can spawn, and the task-owned signal covers startup.
+          // starter can spawn, and the task-owned signal covers startup. This
+          // tool owns the one-shot background run exactly as it owns the
+          // foreground run, so the configured cap applies here too; the
+          // generic task surface has no timeout-specific report (`aborted`
+          // settles as `killed` either way — see the package README).
           const id = jobs.start({
             kind: 'subagent',
             label: args.description,
             owner: parent,
             run: () => {
               const controller = new AbortController()
-              const start = ctx.subagents.start(config.provider, { ...request, signal: controller.signal })
+              const runDeadline = deadline(controller.signal, timeoutMs, SUBAGENT_TIMEOUT_CODE)
+              const start = ctx.subagents.start(config.provider, { ...request, signal: runDeadline.signal })
               return {
                 cancel: (reason?: string) => {
                   controller.abort(reason ?? 'background subagent task killed')
                 },
-                done: settleStart(start, controller.signal),
+                done: settleStart(start, runDeadline.signal).finally(() => { runDeadline[Symbol.dispose]() }),
                 // No readOutput: the child session owns intermediate detail.
               }
             },
@@ -448,11 +531,24 @@ export function apply(ctx: Context, config: Config): void {
           return { kind: 'background' as const, jobId: id }
         }
 
-        const run: SubagentRun = await ctx.subagents.start(config.provider, {
-          ...request,
-          signal: exec.signal,
-        })
-        return settleForegroundRun(run)
+        // The timer starts before `ctx.subagents.start()`, not after it
+        // resolves, so a provider wedged during startup (an unauthenticated
+        // backend's slow retry loop, the motivating case) is bounded too.
+        // `await settleForegroundRun(...)` (not a bare `return`) keeps this
+        // `using` block open until settlement so the timer is not cleared
+        // before it can fire.
+        using runDeadline = deadline(exec.signal, timeoutMs, SUBAGENT_TIMEOUT_CODE)
+        let run: SubagentRun
+        try {
+          run = await ctx.subagents.start(config.provider, {
+            ...request,
+            signal: runDeadline.signal,
+          })
+        } catch (error: unknown) {
+          const timedOut = timeoutOf(runDeadline.signal, SUBAGENT_TIMEOUT_CODE)
+          throw timedOut !== undefined ? new Error(timeoutHeadline(timedOut.timeoutMs)) : error
+        }
+        return await settleForegroundRun(run, runDeadline.signal)
       },
     }))
   }

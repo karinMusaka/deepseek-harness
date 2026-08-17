@@ -16,6 +16,8 @@ A foreground call passes the execution signal through startup and execution, awa
 
 `permissionMode` fixes the child's permission scope for every delegation this tool instance starts; it is deployment configuration, never a model-facing tool argument — the model cannot request a wider scope for one call. Omitting the key leaves the provider's own default (`read-only` for every provider that has the capability); an explicit value requires the provider's `permissionMode` capability and fails the mount without it. See the [pinned-approval Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md) and the [permission-scope Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md).
 
+`timeoutSeconds` bounds a foreground call and a one-shot background call at this instance's own wall clock — both runs this tool owns start-to-finish, so its timer covers `ctx.subagents.start()` itself (a provider wedged during startup, not only a hung result) as well as the awaited result. On expiry the composed signal aborts exactly like a caller cancellation, but the foreground tool result reads as a timeout, not a cancellation, and a real caller cancellation racing an armed timer still reads as cancelled. Omitting the key preserves today's behavior: no cap. Configuring it together with `backgroundMode: 'continuable'` fails at load — a continuable child's turns belong to the continuation manager after inbox acceptance, not this tool, so there is no run here to stop. See the [wall-clock timeout Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md).
+
 ## Config
 
 | Key | Meaning |
@@ -29,6 +31,7 @@ A foreground call passes the execution signal through startup and execution, awa
 | `toolFilter` | Per-child global-tool restriction; requires `toolFilter` capability. |
 | `maxDepth` | Absolute delegation-depth cap, default `3` (`0` forbids delegation); a numeric cap requires the `depthLimit` capability and fails the mount without it. `'provider-managed'` sends no cap for an out-of-process provider whose budget belongs to the child harness. The tool stays visible at the cap; each attempted start checks the calling agent's current depth and returns an errored tool result when rejected. |
 | `permissionMode` | Fixed child permission scope (`'read-only'` \| `'workspace-write'`); requires the `permissionMode` capability and fails the mount without it. Omitted leaves the provider's own default (`read-only`). Never model-visible — a deployment-only choice. |
+| `timeoutSeconds` | Wall-clock cap, in seconds, on this instance's own foreground and one-shot background runs; a positive finite number no greater than `MAX_TIMER_DELAY_MS` (`@deepseek-ai/dsh-timeout`) in milliseconds. Omitted leaves no cap (today's behavior); no Schemastery default is materialized, so existing `spawn`/`fork` compositions are unaffected until a deployment opts in. Fails at load together with `backgroundMode: 'continuable'`. |
 
 ## Concurrency
 
@@ -54,7 +57,7 @@ Prefix-stable while provider instances, names, descriptions, and schemas are unc
 
 #### What the model sees
 
-The call retains the description and prompt. Success contains only the child's final text; other outcomes become `Error: <message>`. Intermediate child steps stay out of the parent.
+The call retains the description and prompt. Success contains only the child's final text; other outcomes become `Error: <message>`. Intermediate child steps stay out of the parent. A configured `timeoutSeconds` that stops the run reads as `Error: subagent run hit its <N>s time limit before finishing` (plus any preserved partial text) — distinct from `Error: subagent run was cancelled`, the caller-cancellation message, so the model never confuses the two.
 
 #### Token effect
 
@@ -83,3 +86,4 @@ Append-only; newly visible content follows the reusable request prefix and does 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries any final assistant message, but it is not this call's return value and cannot be awaited here.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
 - **Child policy is fixed per instance** — another model, persona, tool filter, or depth cap requires another distinctly named tool.
+- **A one-shot background run's timeout is invisible to the generic task surface** — `job_output`/the settlement notice reports a timed-out one-shot child exactly like a `job_kill`ed one (`[status: killed]`); only the foreground path's tool result names the timeout distinctly. Widening the shared `JobOutcome` for this is deferred; see the [wall-clock timeout Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md).

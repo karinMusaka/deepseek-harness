@@ -55,6 +55,7 @@ const SUBAGENT_DURABILITY_FAILURE_CONFIG = fileURLToPath(
 const SUBAGENT_CONTINUABLE_INHERITANCE_CONFIG = fileURLToPath(
   new URL('../subagent-continuable-inheritance.cordis.yml', import.meta.url),
 )
+const SUBAGENT_TIMEOUT_CONFIG = fileURLToPath(new URL('../subagent-timeout.cordis.yml', import.meta.url))
 const LSP_CONFIG = fileURLToPath(new URL('./lsp.cordis.yml', import.meta.url))
 const WEB_CONFIG = fileURLToPath(new URL('../web.cordis.yml', import.meta.url))
 const FS_SEARCH_CONFIG = fileURLToPath(new URL('./fs-search.cordis.yml', import.meta.url))
@@ -394,6 +395,12 @@ const SCENARIOS: Scenario[] = [
   { name: 'subagent-parallel', hasModelTurn: true, recorded: false },
   { name: 'subagent-fork-in-process', hasModelTurn: true, recorded: true },
   { name: 'subagent-mixed', hasModelTurn: true, recorded: true },
+  // `tool-subagent`'s own `timeoutSeconds` (not the child's model call) stops
+  // this run: the forked child's REAL bash call blocks on a real `sleep`, the
+  // configured 0.2s cap fires mid-call, and the parent's tool result must read
+  // as a timeout, not a cancellation. Cancelling a live bash call relies on
+  // POSIX process-group termination, same as `cancel-tool-calls` above.
+  { name: 'subagent-timeout', hasModelTurn: true, recorded: false, configPath: SUBAGENT_TIMEOUT_CONFIG, posixOnly: true },
   // Authored continuable-subagent transcript: a background delegation returns
   // only the durable subagent id, two send_message calls queue as later FIFO
   // turns on that same child (the parent is never woken with their output),

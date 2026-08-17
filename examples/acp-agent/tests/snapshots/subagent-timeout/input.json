@@ -1,0 +1,10 @@
+{
+  "steps": [
+    { "op": "initialize" },
+    { "op": "newSession" },
+    {
+      "op": "prompt",
+      "text": "Use the subagent_fork tool exactly once to delegate this subtask: \"Run this exact command with bash: sleep 30\". After the subagent returns, reply with the single word PARENT_DONE and stop."
+    }
+  ]
+}

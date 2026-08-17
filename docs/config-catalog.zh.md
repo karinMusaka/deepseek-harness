@@ -2661,12 +2661,26 @@ export interface Config {
    * whoever writes the composition, not the delegating model.
    */
   permissionMode?: SubagentPermissionMode
+  /**
+   * Wall-clock cap, in seconds, on this instance's own runs: a positive
+   * finite number no greater than {@link MAX_TIMER_DELAY_MS} in milliseconds.
+   * Applies to a foreground call and a one-shot background call — both owned
+   * by this tool, which starts the timer before `ctx.subagents.start()` so a
+   * provider wedged during startup (an unauthenticated backend's slow retry
+   * loop, for example) is bounded too. Omission preserves today's behavior:
+   * no cap. Rejected at load with `backgroundMode: 'continuable'` — a
+   * continuable child's turns are owned by the continuation manager, not this
+   * tool, so there is no run here to time out. A caller's own cancellation
+   * (the tool call's `exec.signal`) is unaffected and still reports as
+   * cancelled, never as a timeout.
+   */
+  timeoutSeconds?: number
 }
 ```
 
 依赖：[`AgentOptions`](subsystems/core.md) · [`SubagentPermissionMode`](../packages/subagent/subagent/src/index.ts)
 
-来源：[`packages/subagent/tool-subagent/src/index.ts:29`](../packages/subagent/tool-subagent/src/index.ts)
+来源：[`packages/subagent/tool-subagent/src/index.ts:48`](../packages/subagent/tool-subagent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-subagent-report"></a>
 

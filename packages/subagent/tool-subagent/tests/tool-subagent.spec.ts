@@ -17,6 +17,7 @@ import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import * as mock from './scripted-provider.ts'
 import * as tool from '../src/index.ts'
@@ -1328,5 +1329,180 @@ describe('depth budget configuration', () => {
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
     expect(requests[0]?.maxDepth).toBeUndefined()
     expect(requests[0]?.toolFilter).toBeUndefined()
+  })
+})
+
+describe('dsh-tool-subagent timeoutSeconds', () => {
+  /** A provider whose run settles only when its start request's signal aborts. */
+  function registerStallingProvider(ctx: Context, name: string): void {
+    ctx.subagents.registerProvider({
+      name,
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      inheritsParentContext: false,
+      start: async (request) => {
+        const result = new Promise<{ output: never[]; stopReason: 'aborted' }>((resolve) => {
+          request.signal.addEventListener('abort', () => { resolve({ output: [], stopReason: 'aborted' }) }, { once: true })
+        })
+        return {
+          id: SessionId(`${name}-child`),
+          localAgent: undefined,
+          result,
+          dispose: async () => {},
+        }
+      },
+    })
+  }
+
+  it('stops a run at its configured wall-clock cap and reports a timeout, not a cancellation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    registerStallingProvider(ctx, 'stalls')
+    await ctx.plugin(tool, { provider: 'stalls', maxDepth: 'provider-managed', timeoutSeconds: 0.01 })
+
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent run hit its 0.01s time limit before finishing')
+    expect(text(result)).not.toContain('cancelled')
+  })
+
+  it('propagates an ordinary start failure unchanged when no timer won the race', async () => {
+    // A plain start() rejection unrelated to any deadline (no timeoutSeconds
+    // configured at all here) must reach the model as-is, not rewritten into
+    // a timeout headline: `timeoutOf()` on the composed signal is undefined,
+    // so the catch block's other ternary arm runs.
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    ctx.subagents.registerProvider({
+      name: 'plain-start-failure',
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      inheritsParentContext: false,
+      start: async () => { throw new Error('provider misconfigured') },
+    })
+    await ctx.plugin(tool, { provider: 'plain-start-failure', maxDepth: 'provider-managed' })
+
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('provider misconfigured')
+    expect(text(result)).not.toContain('time limit')
+  })
+
+  it('rejects the run during a provider start wedged past the cap, with the same timeout headline', async () => {
+    // The motivating failure (an unauthenticated backend's slow retry loop)
+    // wedges during startup, not during the result await — the timer must
+    // cover ctx.subagents.start() itself, not just run.result.
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    ctx.subagents.registerProvider({
+      name: 'wedged-start',
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      inheritsParentContext: false,
+      start: request => new Promise((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => { reject(new Error('provider-owned start failure: retry loop aborted')) }, { once: true })
+      }),
+    })
+    await ctx.plugin(tool, { provider: 'wedged-start', maxDepth: 'provider-managed', timeoutSeconds: 0.01 })
+
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent run hit its 0.01s time limit before finishing')
+    expect(text(result)).not.toContain('retry loop aborted')
+  })
+
+  it('reports a caller cancellation as cancelled, not a timeout, even with a longer cap configured', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    registerStallingProvider(ctx, 'stalls-cancel')
+    await ctx.plugin(tool, { provider: 'stalls-cancel', maxDepth: 'provider-managed', timeoutSeconds: 60 })
+
+    const controller = new AbortController()
+    const pending = callSubagent(ctx, { description: 'd', prompt: 'p' }, { signal: controller.signal })
+    // Let provider.start install its listener before aborting.
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.abort()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent run was cancelled')
+    expect(text(result)).not.toContain('time limit')
+  })
+
+  it('omits the timer entirely when timeoutSeconds is unconfigured: the provider sees the exact call signal', async () => {
+    let seenSignal: AbortSignal | undefined
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    ctx.subagents.registerProvider({
+      name: 'capture-signal',
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      inheritsParentContext: false,
+      start: async (request) => {
+        seenSignal = request.signal
+        return {
+          id: SessionId('capture-signal-child'),
+          localAgent: undefined,
+          result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' as const }),
+          dispose: async () => {},
+        }
+      },
+    })
+    await ctx.plugin(tool, { provider: 'capture-signal', maxDepth: 'provider-managed' })
+
+    const callSignal = new AbortController().signal
+    await callSubagent(ctx, { description: 'd', prompt: 'p' }, { signal: callSignal })
+    expect(seenSignal).toBe(callSignal)
+  })
+
+  it('rejects timeoutSeconds combined with backgroundMode: continuable at load (schema path)', async () => {
+    await expect(setup({
+      provider: 'mock',
+      backgroundMode: 'continuable',
+      timeoutSeconds: 5,
+      maxDepth: 'provider-managed',
+    })).rejects.toThrow(/`timeoutSeconds` cannot be combined with `backgroundMode: 'continuable'`/)
+  })
+
+  it('rejects timeoutSeconds combined with backgroundMode: continuable when apply() is invoked directly', () => {
+    const ctx = new Context()
+    expect(() => {
+      tool.apply(ctx, { provider: 'unused', backgroundMode: 'continuable', timeoutSeconds: 5 })
+    }).toThrow(/`timeoutSeconds` cannot be combined with `backgroundMode: 'continuable'`/)
+  })
+
+  it.each([
+    { label: 'zero', value: 0 },
+    { label: 'a negative number', value: -1 },
+    { label: 'NaN', value: Number.NaN },
+    { label: 'positive infinity', value: Number.POSITIVE_INFINITY },
+    { label: 'negative infinity', value: Number.NEGATIVE_INFINITY },
+    { label: 'a value beyond MAX_TIMER_DELAY_MS', value: (MAX_TIMER_DELAY_MS / 1000) + 1 },
+  ])('rejects timeoutSeconds=$label when the plugin loads (schema path)', async ({ value }) => {
+    await expect(setup({ provider: 'mock', timeoutSeconds: value })).rejects.toThrow()
+  })
+
+  it.each([
+    { label: 'zero', value: 0, message: 'tool-subagent: timeoutSeconds must be a positive finite number' },
+    { label: 'a negative number', value: -1, message: 'tool-subagent: timeoutSeconds must be a positive finite number' },
+    { label: 'NaN', value: Number.NaN, message: 'tool-subagent: timeoutSeconds must be a positive finite number' },
+    { label: 'positive infinity', value: Number.POSITIVE_INFINITY, message: 'tool-subagent: timeoutSeconds must be a positive finite number' },
+    { label: 'negative infinity', value: Number.NEGATIVE_INFINITY, message: 'tool-subagent: timeoutSeconds must be a positive finite number' },
+    {
+      label: 'a value beyond MAX_TIMER_DELAY_MS',
+      value: (MAX_TIMER_DELAY_MS / 1000) + 1,
+      message: `tool-subagent: timeoutSeconds must be no greater than ${MAX_TIMER_DELAY_MS / 1000} seconds`,
+    },
+  ])('rejects timeoutSeconds=$label when apply() is invoked directly without Schemastery', ({ value, message }) => {
+    const ctx = new Context()
+    expect(() => {
+      tool.apply(ctx, { provider: 'unused', timeoutSeconds: value })
+    }).toThrow(message)
   })
 })

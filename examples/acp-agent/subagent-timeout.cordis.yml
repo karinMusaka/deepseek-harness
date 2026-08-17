@@ -1,0 +1,19 @@
+# Wall-clock timeout snapshot overlay: keep the default composition (both
+# `subagent`/`subagent_fork` tool schemas stay byte-identical — `timeoutSeconds`
+# is deployment configuration, never model-visible) and add a short cap to the
+# `subagent_fork` instance so a child that blocks past it is stopped by this
+# tool's own timer instead of running to the fixture's crash point.
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - id: tool-subagent-fork
+        name: '@deepseek-ai/dsh-tool-subagent'
+        config:
+          provider: fork
+          toolName: subagent_fork
+          backgroundMode: one-shot
+          enableRunInBackground: false
+          maxDepth: 1
+          timeoutSeconds: 0.2
