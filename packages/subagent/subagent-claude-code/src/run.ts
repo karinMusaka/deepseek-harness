@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { resolve as resolvePath } from 'node:path'
 import {
   query as officialQuery,
   type CanUseTool,
@@ -31,6 +32,7 @@ import {
   type SubagentRun,
   type SubagentStartRequest,
   type SubagentStopReason,
+  type SubagentUsage,
 } from '@deepseek-ai/dsh-subagent'
 import {
   scrubbedParentEnv,
@@ -209,20 +211,181 @@ export function claudeFailureMessage(fields: ClaudeResultFields): string {
 }
 
 /**
+ * Write-capable tool → its file-path-bearing input argument, verified against
+ * the pinned SDK's own `sdk-tools.d.ts` input interfaces: `FileWriteInput`
+ * and `FileEditInput` both use `file_path`; `NotebookEditInput` uses
+ * `notebook_path`. There is no `MultiEdit` tool in this pinned SDK (0.3.220) —
+ * the collector set is exactly the write-capable subset of the permission-scope
+ * Note's own `WORKSPACE_WRITE_ALLOWED_TOOLS` allowlist, minus `Bash` (a shell
+ * command has no inspectable file-path argument; see Known Limitations).
+ */
+const WRITE_TOOL_PATH_FIELD: ReadonlyMap<string, string> = new Map([
+  ['Write', 'file_path'],
+  ['Edit', 'file_path'],
+  ['NotebookEdit', 'notebook_path'],
+])
+
+/**
+ * One write-capable `tool_use` block's candidate path, pending its matching
+ * `tool_result`'s outcome. Not yet a reported change: {@link consumeClaudeQuery}
+ * only reports it once a same-id, non-error `tool_result` is also observed
+ * AND the id is absent from the terminal result's own `permission_denials` —
+ * a denied or failed call's `tool_use` block exists on the wire exactly like a
+ * successful one (measured; see the Agent Note), so `tool_use` presence alone
+ * is never sufficient.
+ * @param block - one raw assistant-message content block.
+ * @returns the candidate `{ id, path }`, or `undefined` when `block` does not
+ *   name a write-capable tool with a non-empty string path argument.
+ */
+export function writeToolUseCandidate(block: unknown): { readonly id: string; readonly path: string } | undefined {
+  if (block === null || typeof block !== 'object') return undefined
+  const record = block as Record<string, unknown>
+  if (record.type !== 'tool_use' || typeof record.id !== 'string' || record.id.length === 0) return undefined
+  const field = typeof record.name === 'string' ? WRITE_TOOL_PATH_FIELD.get(record.name) : undefined
+  if (field === undefined) return undefined
+  const input = record.input
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const path = (input as Record<string, unknown>)[field]
+  return typeof path === 'string' && path.length > 0 ? { id: record.id, path } : undefined
+}
+
+/**
+ * Every `tool_use_id` with a non-error `tool_result` in one message's raw
+ * `content`. `content` is read as `unknown` on purpose (see
+ * {@link messageContent}): the official SDK types this as
+ * `string | Array<ContentBlockParam>` and a plain string (no tool results) is
+ * the common case, and a `content` array element may not carry every field
+ * this reads even when the message's own static type says it does.
+ * @param content - one message's raw `message.content`.
+ * @returns the set of `tool_use_id`s with a non-error `tool_result`.
+ */
+export function successfulToolResultIds(content: unknown): ReadonlySet<string> {
+  const ids = new Set<string>()
+  if (!Array.isArray(content)) return ids
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type === 'tool_result' && typeof record.tool_use_id === 'string' && record.is_error !== true) {
+      ids.add(record.tool_use_id)
+    }
+  }
+  return ids
+}
+
+/**
+ * One message's `message.content` array, read without trusting the nested
+ * `.message`/`.content` shape. Bypassing the SDK's typed `message.message`
+ * field (rather than accessing it directly) matches this module's existing
+ * `resultFields()` precedent: the pinned SDK's own declared types are not
+ * fully trustworthy against the measured product (see the failure
+ * -classification Agent Note's `subtype` finding), and a metadata-collection
+ * read must never crash a message the rest of this loop already handles. The
+ * outer `message` argument itself is NOT defensively checked here — both call
+ * sites in {@link consumeClaudeQuery} reach this function only after already
+ * narrowing `message.type === 'assistant' | 'user'`, which only a real object
+ * can satisfy, so that outer check was unreachable dead code and was removed
+ * rather than tested (see the Agent Note's Alternatives considered).
+ * @param message - one already-narrowed assistant/user stream message.
+ * @returns the content array, or `[]` when `.message` or `.message.content`
+ *   is absent or not the expected shape.
+ */
+function messageContent(message: { readonly message?: unknown }): readonly unknown[] {
+  const inner = message.message
+  if (inner === null || typeof inner !== 'object') return []
+  const content = (inner as Record<string, unknown>).content
+  return Array.isArray(content) ? content : []
+}
+
+/**
+ * Normalize Claude's own terminal-result `usage` to {@link SubagentUsage}'s
+ * cache-inclusive `inputTokens` meaning (see that type's own JSDoc and the
+ * Agent Note): Claude's native `input_tokens` EXCLUDES its two cache fields,
+ * so they are summed in to reach the common meaning. Reads the raw record,
+ * not the SDK's typed (required) `usage` field, for the same reason
+ * {@link messageContent} does — a supplementary metadata field must never
+ * flatten an otherwise-successful run to `stopReason: 'error'` by throwing on
+ * an unexpectedly absent value.
+ * @param message - the terminal result message.
+ * @returns the normalized usage, or `undefined` when the raw `usage` is not
+ *   the expected shape.
+ */
+export function claudeUsage(message: unknown): SubagentUsage | undefined {
+  if (message === null || typeof message !== 'object') return undefined
+  const usage = (message as Record<string, unknown>).usage
+  if (usage === null || typeof usage !== 'object') return undefined
+  const record = usage as Record<string, unknown>
+  const inputTokens = record.input_tokens
+  const outputTokens = record.output_tokens
+  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return undefined
+  const cacheRead = typeof record.cache_read_input_tokens === 'number' ? record.cache_read_input_tokens : 0
+  const cacheWrite = typeof record.cache_creation_input_tokens === 'number' ? record.cache_creation_input_tokens : 0
+  return {
+    inputTokens: inputTokens + cacheRead + cacheWrite,
+    outputTokens,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: cacheWrite,
+  }
+}
+
+/**
+ * Every `tool_use_id` denied in the terminal result's own
+ * `permission_denials`, read from the raw record for the same reason
+ * {@link claudeUsage} does. A missing or malformed `permission_denials` is
+ * safe to treat as "nothing denied": the inclusion rule in
+ * {@link consumeClaudeQuery} requires POSITIVE evidence of success (a
+ * same-id, non-error `tool_result`) before reporting a change at all, and a
+ * denied call's own `tool_result` already carries `is_error: true` — this set
+ * is defense in depth, not the primary exclusion signal.
+ * @param message - the terminal result message.
+ * @returns the denied tool_use ids, or an empty set when absent or malformed.
+ */
+export function deniedToolUseIds(message: unknown): ReadonlySet<string> {
+  if (message === null || typeof message !== 'object') return new Set()
+  const denials = (message as Record<string, unknown>).permission_denials
+  if (!Array.isArray(denials)) return new Set()
+  const ids = new Set<string>()
+  for (const denial of denials) {
+    if (denial !== null && typeof denial === 'object' && typeof (denial as Record<string, unknown>).tool_use_id === 'string') {
+      ids.add((denial as Record<string, unknown>).tool_use_id as string)
+    }
+  }
+  return ids
+}
+
+/**
  * Consume the complete SDK stream and require one strict success plus normal
  * iterator completion. Classifies from {@link resultFields}, never `subtype`.
  * @param query - published official SDK query.
+ * @param cwd - the child's own working directory, for resolving a relative
+ *   `tool_use` path (measured: Claude's own `file_path`/`notebook_path`
+ *   argument can be relative to it despite the SDK's type documentation
+ *   saying absolute; see the Agent Note).
  * @returns the completed shared result.
  */
 export async function consumeClaudeQuery(
   query: AsyncIterable<SDKMessage>,
+  cwd: string,
 ): Promise<SubagentResult> {
   let answer: string | undefined
   let retainedAssistantClass: SubagentFailureCode | undefined
+  const pendingWrites = new Map<string, string>()
+  const succeededIds = new Set<string>()
+  let resolvedUsage: SubagentUsage | undefined
+  let resolvedChangedFiles: readonly string[] | undefined
   for await (const message of query) {
-    if (message.type === 'assistant' && message.error !== undefined) {
-      const classified = classifyAssistantError(message.error)
-      if (classified !== undefined) retainedAssistantClass = classified
+    if (message.type === 'assistant') {
+      if (message.error !== undefined) {
+        const classified = classifyAssistantError(message.error)
+        if (classified !== undefined) retainedAssistantClass = classified
+      }
+      for (const block of messageContent(message)) {
+        const candidate = writeToolUseCandidate(block)
+        if (candidate !== undefined) pendingWrites.set(candidate.id, candidate.path)
+      }
+      continue
+    }
+    if (message.type === 'user') {
+      for (const id of successfulToolResultIds(messageContent(message))) succeededIds.add(id)
       continue
     }
     if (message.type !== 'result') continue
@@ -230,6 +393,18 @@ export async function consumeClaudeQuery(
     if (!fields.isError) {
       if (fields.resultText !== undefined && fields.resultText.trim().length > 0) {
         answer = fields.resultText
+        resolvedUsage = claudeUsage(message)
+        const denied = deniedToolUseIds(message)
+        const changed: string[] = []
+        const seen = new Set<string>()
+        for (const [id, path] of pendingWrites) {
+          if (!succeededIds.has(id) || denied.has(id)) continue
+          const absolute = resolvePath(cwd, path)
+          if (seen.has(absolute)) continue
+          seen.add(absolute)
+          changed.push(absolute)
+        }
+        if (changed.length > 0) resolvedChangedFiles = changed
         continue
       }
       throw new Error('subagent-claude-code: Claude Code succeeded but returned no answer')
@@ -244,6 +419,8 @@ export async function consumeClaudeQuery(
   return {
     output: [{ type: 'text', text: answer }],
     stopReason: 'completed',
+    ...resolvedChangedFiles !== undefined ? { changedFiles: resolvedChangedFiles } : {},
+    ...resolvedUsage !== undefined ? { usage: resolvedUsage } : {},
   }
 }
 
@@ -450,7 +627,7 @@ export async function startClaudeCodeRun(
   const publishedQuery = query
   const publishedChild = child
   const result = settleRunResult({
-    attempt: () => consumeClaudeQuery(publishedQuery),
+    attempt: () => consumeClaudeQuery(publishedQuery, spec.cwd),
     collectOutput: () => [],
     cancelled: () => controller.signal.aborted,
     onError: spec.onError,

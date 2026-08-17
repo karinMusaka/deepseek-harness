@@ -12,6 +12,10 @@ SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK �
 
 本地取消会在结果竞态中胜出并映射为 `aborted`。`dispose()`（资源释放）具有幂等性：它会中止此次运行、请求 SDK query 关闭、调用共享的进程树逐级终止机制，并等待整棵进程树退出。SDK 的优雅关闭只表达协议意图；进程是否完全停稳仍以子进程句柄为准。结果失败与独立的清理失败仍彼此分离。
 
+### 变更文件与用量
+
+`completed` 结果还会在该次运行自身的消息流携带相关信息时，附带 `changedFiles`（绝对路径，已去重）与 `usage`（`{ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }`）——共享约定与纳入规则见 [`dsh-subagent`](../subagent/README.md#one-shot-ownership-and-lifecycle)。`changedFiles` 从 assistant 消息中收集 `Write`／`Edit`／`NotebookEdit` 的 `tool_use` 块（分别对应 `file_path`／`notebook_path`——已锁定的 SDK 中没有 `MultiEdit` 工具），但只有在**同时**满足以下两个条件时才会上报某个候选项：后续某条 user 消息中存在同一 id 的 `tool_result` 且未报错，**并且**该 id 不在终态结果自身的 `permission_denials` 中。**一次被拒绝或失败的工具调用，其 `tool_use` 块在 wire 上的存在方式与一次成功调用完全相同**（实测：一次只读运行中被拒绝的 `Write`／`Bash` 都产生了普通的 `tool_use` 块）——仅凭 `tool_use` 的存在来收集，会把一次只读运行误报为写入了文件，因此必须要求正面的成功证据，绝不能仅凭"未被拒绝"就断定成功。**相对的 `file_path`／`notebook_path` 会在上报前针对子级自身的 cwd 解析为绝对路径**——实测：原始的 `tool_use.input.file_path` 值可能是相对路径（例如 `"made.txt"`），尽管 SDK 自身的类型文档称其为"要修改文件的绝对路径"；真实 CLI 会在执行前在内部完成解析，但经由 wire 传来的值是模型给出的、未经解析的原始字符串。`usage` 读取终态结果消息自身的 `usage` 字段，并归一化为共享的、含缓存的 `inputTokens` 语义（Claude 的原生 `input_tokens` 不含两个缓存字段，因此需要把它们相加）。完整实测证据参见[变更文件与用量 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-changed-files-and-usage.md)。
+
 ### 失败分类
 
 `error` 这一 stop reason 会携带一个已分类的 `SubagentResult.failure`（`auth`/`quota`/`provider`/`protocol`，参见 [`dsh-subagent`](../../../docs/subsystems/subagent.md#the-terminal-result-subagentresult)）。本提供方还会消费 `assistant` 消息（此前完全跳过），以保留见到过的最具体 `SDKAssistantMessageError`：`authentication_failed`/`oauth_org_not_allowed` 分类为 `auth`；`rate_limit`/`billing_error`/`overloaded` 分类为 `quota`；其余已命名的值分类为 `provider`；`max_output_tokens` 是单条消息级别的截断提示，不是终态失败信号，不会被保留。在终态结果处，保留下来的原因优先；否则由结果自身的 `api_error_status`（401 → `auth`，429 → `quota`）决定；再否则分类为 `provider`。`protocol` 在这里永远不适用——SDK 完全屏蔽了自己的 wire 传输层。未来某个未识别的 `SDKAssistantMessageError` 值会落到 `provider`，而不是直接失败关闭。`SubagentResult.authMode` 在 `Config.env` 设置了凭据形状的变量名时为 `'api-key'`，否则为 `'subscription'`——纯粹从该配置推导，绝不读取 `~/.claude`。
@@ -82,7 +86,7 @@ Claude Code 子级会在一个全新的 SDK query 中接收独立文本任务。
 
 #### 模型看到的内容
 
-通过 `dsh-tool-subagent`，父级模型只会看到符合严格成功条件的 Claude Code 最终答案，或者在结果未完成时看到消费方给出的原样错误。一次已分类的 `error` 会以某个分类专属的标题（例如 "subagent could not authenticate with its provider: …"）加上 Claude Code 自身的可操作文本（例如 `"Not logged in · Please run /login"`，已针对凭据形状的模式做过筛查）到达模型。Claude Code 的推理、工具活动、中间消息、stderr、工作区差异、用量信息和产品标识符均不会复制到父会话。
+通过 `dsh-tool-subagent`，父级模型只会看到符合严格成功条件的 Claude Code 最终答案、其观察到的 `changedFiles`／`usage`，或者在结果未完成时看到消费方给出的原样错误。一次已分类的 `error` 会以某个分类专属的标题（例如 "subagent could not authenticate with its provider: …"）加上 Claude Code 自身的可操作文本（例如 `"Not logged in · Please run /login"`，已针对凭据形状的模式做过筛查）到达模型。Claude Code 的推理、工具活动、中间消息、stderr 和产品标识符均不会复制到父会话。
 
 #### 对 token 的影响
 
@@ -99,9 +103,11 @@ Claude Code 子级会在一个全新的 SDK query 中接收独立文本任务。
 - **产品安装与账户状态仍由原生机制管理**：`claude` 缺失或不兼容、配置错误或身份验证失败都会呈现为启动错误或运行错误；本插件不提供安装程序或登录流程。
 - **SDK 平台 CLI 仍在安装闭包内**：生产环境会忽略它，改用宿主提供的 `claude`，但当前 SDK 的可选依赖仍会安装，并提供无密钥兼容性 fixture。移除该载荷属于独立的产品安装闭包后续项。
 - **没有人工交互路径**：`AskUserQuestion` 被禁用，其他交互回调也不存在，因此需要新审批或输入的任务会失败而不会挂起。
-- **仅返回最终文本**：推理、中间消息、工具通信、用量信息、stderr 和工作区差异仍只保留在产品内部。
+- **只返回最终文本、变更文件与用量**：推理、中间消息、工具通信和 stderr 仍只保留在产品内部；只有最终答案、`changedFiles` 与 `usage` 会进入共享结果（见上文"变更文件与用量"）。
 - **除 `permissionMode` 外没有可选的共享能力**：对于本提供方，共享服务会拒绝输出 schema、子任务角色设定、工具筛选和 harness 深度强制约束。
 - **没有按实际经过时间触发的超时或副作用回滚**：长时间运行的工作由调用方取消，且取消前已更改的文件或外部系统不会恢复原状。
 - **`protocol` 对本提供方不可达**：SDK 端到端地拥有自己的 wire 传输层，因此那里的形状偏差永远不会作为可分类的原因到达本提供方；一次在任何 result 消息之前发生的流或进程崩溃，只会呈现为一个未分类的 `error`。
 - **失败分类是针对外部开放词汇表的尽力而为**：`SDKAssistantMessageError` 可能在未来的 SDK 版本中扩充；未识别的值会分类为 `provider` 而不是直接失败关闭。
 - **`authMode` 报告的是配置，而非实时账户状态**：它从不探测 `~/.claude`，因此如果部署方设置了一个凭据形状的 `env` 条目但子进程实际并未使用它（或反之），报告的是配置的意图，而不是关于某次运行实际使用了哪个凭据的已验证事实。
+- **`Bash` 写入对 `changedFiles` 不可见**：shell 命令没有本收集器可读取的 `file_path` 参数，因此通过 `Bash` 完成的变更（PR1 的 `workspace-write` 范围允许这么做）绝不会被上报，即便文件确实被写入了。依赖 `changedFiles` 在 `workspace-write` 下做审计追踪的部署方，不能假定它枚举了子级触及过的每一个文件；`codex` 姊妹提供方的操作系统级沙箱能把一次由 `apply_patch` 驱动的 shell 变更捕获为 `fileChange` 项，但同样会漏掉普通 shell 写入（见该包的 README）——这一不对称是真实存在的，但比"Claude 什么都漏、Codex 什么都不漏"要窄得多。
+- **`changedFiles`／`usage` 在 `aborted` 或未分类的 `error` 结果上缺省**：两者只在 `consumeClaudeQuery()` 的成功分支上填充；被取消或未分类失败的运行不携带任何部分文件或用量统计（与共享包自身的相同缺口）。

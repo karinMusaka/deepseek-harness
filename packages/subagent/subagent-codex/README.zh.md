@@ -14,6 +14,12 @@
 
 本地取消会在结果竞态中胜出并映射为 `aborted`。失败轮次的 `codexErrorInfo` 若为 `contextWindowExceeded`，则映射为 `max-tokens`；其他任何远端中断或失败轮次都映射为 `error`，且该提供方不会产生 `refusal`。`dispose()`（资源释放）具有幂等性：如果当前的两个标识符均已知，它会尽力请求 `turn/interrupt`，关闭 JSON-RPC 通信链路，结束标准输入，调用共享的进程树逐级终止机制，并等待整棵进程树退出。结果失败与独立的清理失败仍彼此分离。
 
+### 变更文件与用量
+
+`completed` 或 `max-tokens` 结果还会在 wire 观察到相关信息时携带 `changedFiles`（绝对路径，已去重）和 `usage`（`{ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }`）——共享约定与纳入规则见 [`dsh-subagent`](../subagent/README.md#one-shot-ownership-and-lifecycle)。`changedFiles` 只收集自身 `status` 为 `'completed'` 的 `item/completed` `fileChange` 项；`declined`/`failed`/`inProgress` 状态的项会被静默跳过，绝不上报（实测；参见 [Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-changed-files-and-usage.md)）。`usage` 只保留最后一次观察到的 `thread/tokenUsage/updated` 通知的累积 `total`——app-server 每个轮次会多次触发该通知，每次携带的都是运行的累计总量而非增量，将它们相加会造成重复计数（实测）。`turn/diff/updated`（在真实 app-server 上同样观察到）刻意未被采用：它为整个轮次携带一段未经结构化的统一 diff 文本，而 `changedFiles` 所需要的正是 `fileChange` 这种按条目、按路径、附带状态限定的结构化形态。
+
+**实测：只有由 `apply_patch` 驱动的写入才会产生 `fileChange` 项。** 一次普通的 shell 写入（例如通过 `exec_command`/`shell_command` 执行 `printf WROTE > marker.txt`）会创建文件，但只会上报一个 `commandExecution` 项——绝不会上报 `fileChange`——因此它对 `changedFiles` 而言不可见，这与 Claude 的 `Bash` 写入对该提供方自身收集器不可见的情形完全对称（见该包的 README）。Codex 自身的系统指令要求模型"始终使用 `apply_patch` 进行手动代码编辑"，这在实践中收窄了这一缺口，但并未彻底消除它。只读子级的 `apply_patch` 尝试会在 codex-core 为其发出任何条目之前，就被操作系统沙箱拒绝（而不是产生一个 `declined` 状态的条目）——两种情形下 `changedFiles` 为空的结果是相同的。
+
 ### 失败分类
 
 只要 wire 能够对原因分类，`error` 这一 stop reason 就会携带一个已分类的 `SubagentResult.failure`（`auth`/`quota`/`provider`/`protocol`，参见 [`dsh-subagent`](../../../docs/subsystems/subagent.md#the-terminal-result-subagentresult)）。app-server 自身的中间 `error` 通知——`turn/completed` 不会重复它们——携带了有结构的真实原因；针对真实未认证环境的实测表明，终态轮次自身的 `codexErrorInfo` 会退化为字面量 `"other"`，因此本提供方会在整个轮次的 `error` 通知中保留见到过的最具体原因，而不是只信任终态那一个（实测；参见[失败分类 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-failure-classification.md)）。`httpStatusCode === 401` 或 `codexErrorInfo === 'unauthorized'` 分类为 `auth`；`httpStatusCode === 429` 或 `'usageLimitExceeded'`/`'serverOverloaded'` 分类为 `quota`；其他任何原生原因分类为 `provider`；本 wire 自身校验器拒绝的 JSON-RPC 形状偏差分类为 `protocol`。未来某个未识别的 `codexErrorInfo` 值会落到 `provider`，而不是直接失败关闭。`SubagentResult.authMode` 在 `Config.env` 设置了凭据形状的变量名时为 `'api-key'`，否则为 `'subscription'`——纯粹从该配置推导，绝不读取 `~/.codex`。
@@ -90,8 +96,11 @@ Codex 子级会在一个全新的临时线程中，以单个轮次接收这些�
 - **产品安装和账户状态由宿主管理**：`codex` 缺失或不兼容、配置错误或身份验证失败，都会呈现为启动错误或运行错误；本插件不提供安装程序、登录流程或运行时版本门禁。
 - **兼容性由开发证据锁定**：若要从已验证的 0.147.0 协议基线升级，必须重新生成上游 schema 证据，并重新运行握手、答案选择、审批、取消、无密钥真实产品以及带密钥的 DeepSeek 随机数测试。
 - **没有人工审批路径**：`approvalPolicy` 始终是固定字面量 `'never'`；已知的无人值守审批请求会被拒绝，未知服务器请求会以默认拒绝方式使运行失败；部署方无法通过本包配置允许策略。
-- **仅返回最终文本**：推理、过程说明、中间消息、工具通信、用量信息、stderr 和工作区差异仍只保留在产品内部。
+- **只返回最终文本、变更文件与用量**：推理、过程说明、未被选中作为答案的中间消息、工具通信、stderr，以及 `turn/diff/updated` 的原始统一 diff 文本仍只保留在产品内部；只有最终答案、`changedFiles` 与 `usage` 会进入共享结果（见上文"变更文件与用量"）。
 - **除 `permissionMode` 外没有可选的共享能力**：对于本提供方，共享服务会拒绝输出 schema、子任务角色设定、工具筛选和 harness 深度强制约束。
 - **没有按实际经过时间触发的超时或副作用回滚**：长时间运行的工作由调用方取消，且取消前已更改的文件或外部系统不会恢复原状。
 - **失败分类是针对外部开放词汇表的尽力而为**：`codexErrorInfo` 的枚举可能在未来的 app-server 版本中扩充；未识别的值会分类为 `provider` 而不是直接失败关闭，因此一个新的原生原因永远不会被误报为 `auth`/`quota`，但可能最初分类得比该包后续更新之后更粗。
 - **`authMode` 报告的是配置，而非实时账户状态**：它从不探测 `~/.codex`，因此如果部署方设置了一个凭据形状的 `env` 条目但子进程实际并未使用它（或反之），报告的是配置的意图，而不是关于某次运行实际使用了哪个凭据的已验证事实。
+- **普通 shell 写入对 `changedFiles` 不可见**：只有由 `apply_patch` 驱动的变更才会被上报（实测；见上文"变更文件与用量"）。依赖 `changedFiles` 在 `workspace-write` 下做审计追踪的部署方，不能假定它枚举了子级触及过的每一个文件。
+- **`changedFiles`／`usage` 在 `aborted` 或未分类的 `error` 结果上缺省**：两者只在 `wire.runTurn()` 直接构造 `completed`／`max-tokens` 结果处填充；被取消或未分类失败的运行不携带任何部分文件或用量统计（与共享包自身的相同缺口）。
+- **委派运行期间会触发宿主配置的 hook**：在真实 app-server 上观察到委派轮次期间会产生 `hook/started`／`hook/completed` 通知，其来源是宿主自身的 Codex 配置，而不是本提供方固定的 `thread/start` 参数（`sandbox`／`approvalPolicy`）。与沙箱和审批策略不同，hook 目前未被本包钉定；宿主 hook 有可能观察到甚至影响一次委派子级的轮次。这超出本包的范围。

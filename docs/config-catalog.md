@@ -2678,7 +2678,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md) · [`SubagentPermissionMode`](../packages/subagent/subagent/src/index.ts)
 
-Source: [`packages/subagent/tool-subagent/src/index.ts:130`](../packages/subagent/tool-subagent/src/index.ts)
+Source: [`packages/subagent/tool-subagent/src/index.ts:131`](../packages/subagent/tool-subagent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-subagent-report"></a>
 

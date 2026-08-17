@@ -23,6 +23,7 @@ import type {
   SubagentProvider,
   SubagentResult,
   SubagentRun,
+  SubagentUsage,
 } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { SENSITIVE_ENV_PATTERN } from '@deepseek-ai/dsh-subprocess'
@@ -244,6 +245,30 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
+/**
+ * Model-facing note listing files the run changed, or `''` when the run
+ * reported none — the common read-only-run case adds no noise to the result.
+ * @param paths - the settled result's `changedFiles`, if any.
+ * @returns the note text, prefixed with its own blank-line separator, or `''`.
+ */
+function renderChangedFilesNote(paths: string[] | undefined): string {
+  if (paths === undefined || paths.length === 0) return ''
+  return `\n\nFiles changed:\n${paths.map(path => `- ${path}`).join('\n')}`
+}
+
+/**
+ * Model-facing token usage note, or `''` when the provider reported none.
+ * @param usage - the settled result's `usage`, if any.
+ * @returns the note text, prefixed with its own blank-line separator, or `''`.
+ */
+function renderUsageNote(usage: SubagentUsage | undefined): string {
+  if (usage === undefined) return ''
+  const cache = usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0
+    ? ` (${usage.cacheReadTokens} cached read, ${usage.cacheWriteTokens} cached write)`
+    : ''
+  return `\n\nTokens used: ${usage.inputTokens} in, ${usage.outputTokens} out${cache}`
+}
+
 /** Settle pending startup without rejecting the task producer contract. */
 async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
   try {
@@ -317,6 +342,10 @@ type ForegroundToolResult = {
   readonly kind: 'foreground'
   readonly runId: SubagentRun['id']
   readonly output: JsonValue[]
+  /** Absolute paths the child changed, present only when non-empty (the common read-only case reports no key at all). */
+  readonly changedFiles?: string[]
+  /** Normalized token usage, present only when the provider reported any. */
+  readonly usage?: SubagentUsage
 }
 
 /**
@@ -347,6 +376,10 @@ async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal
         // Content blocks already cross durable JSON boundaries elsewhere;
         // the registry performs the authoritative lossless snapshot here.
         output: result.output as unknown as JsonValue[],
+        ...result.changedFiles !== undefined && result.changedFiles.length > 0
+          ? { changedFiles: [...result.changedFiles] }
+          : {},
+        ...result.usage !== undefined ? { usage: result.usage } : {},
       }
     }),
   ])
@@ -547,6 +580,21 @@ export function apply(ctx: Context, config: Config): void {
                 kind: { type: 'string', required: true, const: 'foreground' },
                 runId: { type: 'string', required: true },
                 output: { type: 'array', required: true, items: { type: 'json' } },
+                // Optional: omitted entirely for the common case (a read-only
+                // run, or a provider that observed no writes/usage) rather
+                // than present-but-empty — see `renderChangedFilesNote`/
+                // `renderUsageNote` below for the matching no-noise rendering.
+                changedFiles: { type: 'array', items: { type: 'string' } },
+                usage: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    inputTokens: { type: 'number', required: true },
+                    outputTokens: { type: 'number', required: true },
+                    cacheReadTokens: { type: 'number', required: true },
+                    cacheWriteTokens: { type: 'number', required: true },
+                  },
+                },
               },
             },
           ],
@@ -557,7 +605,7 @@ export function apply(ctx: Context, config: Config): void {
             ? `started background subagent task ${value.jobId}`
             : value.kind === 'continuable'
               ? `started subagent ${value.subagentId}`
-              : outputValueText(value.output),
+              : outputValueText(value.output) + renderChangedFilesNote(value.changedFiles) + renderUsageNote(value.usage),
         }],
       },
       // Children never mutate the parent session; the one parent-owned write

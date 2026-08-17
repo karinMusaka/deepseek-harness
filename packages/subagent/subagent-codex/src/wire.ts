@@ -11,7 +11,7 @@ import type { Readable, Writable } from 'node:stream'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-llm'
 import { ClassifiedSubagentFailure } from '@deepseek-ai/dsh-subagent'
-import type { SubagentFailureCode, SubagentPermissionMode, SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailureCode, SubagentPermissionMode, SubagentResult, SubagentUsage } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 
 /**
@@ -52,6 +52,15 @@ function object(value: unknown, label: string): JsonObject {
 /** See {@link object}: the same protocol-deviation classification for a required string field. */
 function string(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.length === 0) {
+    const message = `subagent-codex: app-server returned invalid ${label}`
+    throw new ClassifiedSubagentFailure(message, { code: 'protocol', message })
+  }
+  return value
+}
+
+/** See {@link object}: the same protocol-deviation classification for a required finite-number field. */
+function number(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
     const message = `subagent-codex: app-server returned invalid ${label}`
     throw new ClassifiedSubagentFailure(message, { code: 'protocol', message })
   }
@@ -200,6 +209,21 @@ export class CodexAppServerWire {
    */
   private retainedErrorLabel: string | undefined
   private retainedHttpStatusCode: number | undefined
+  /**
+   * Absolute paths from every `completed`-status `fileChange` item observed
+   * this turn, in first-observed order. A `declined`/`failed`/`inProgress`
+   * item is never added (measured: the app-server's own `status` field is the
+   * authoritative success signal — see the Agent Note).
+   */
+  private readonly changedFilePaths = new Set<string>()
+  /**
+   * The LAST observed `thread/tokenUsage/updated` notification's cumulative
+   * `total`, overwritten (never merged) on each arrival. The app-server fires
+   * this notification several times per turn, each carrying the run's running
+   * total, not a delta — retaining only the last avoids double-counting
+   * (measured, see the Agent Note).
+   */
+  private retainedUsage: SubagentUsage | undefined
 
   constructor(
     private readonly input: Readable,
@@ -301,7 +325,7 @@ export class CodexAppServerWire {
     const terminal = object(completed.turn, 'turn/completed turn')
     const status = terminal.status
     if (isContextWindowExceeded(terminal)) {
-      return { output: this.collectOutput(), stopReason: 'max-tokens' }
+      return { output: this.collectOutput(), stopReason: 'max-tokens', ...this.resultExtras() }
     }
     if (status !== 'completed') {
       if (status === 'failed') throw this.classifiedTurnFailure(terminal)
@@ -311,7 +335,7 @@ export class CodexAppServerWire {
     if (output.length === 0) {
       throw new Error('subagent-codex: Codex completed without a final answer')
     }
-    return { output, stopReason: 'completed' }
+    return { output, stopReason: 'completed', ...this.resultExtras() }
   }
 
   /**
@@ -335,6 +359,18 @@ export class CodexAppServerWire {
     return selected !== undefined && selected.trim().length > 0
       ? [{ type: 'text', text: selected }]
       : []
+  }
+
+  /**
+   * `changedFiles`/`usage` for a `completed` or `max-tokens` result, omitted
+   * (not empty-valued) when nothing was observed — the common read-only-run
+   * case reports neither key at all.
+   */
+  private resultExtras(): Pick<SubagentResult, 'changedFiles' | 'usage'> {
+    return {
+      ...this.changedFilePaths.size > 0 ? { changedFiles: [...this.changedFilePaths] } : {},
+      ...this.retainedUsage !== undefined ? { usage: this.retainedUsage } : {},
+    }
   }
 
   /** Detach JSON-RPC listeners and reject outstanding requests. Idempotent. */
@@ -441,6 +477,45 @@ export class CodexAppServerWire {
     }
   }
 
+  /**
+   * Record every path from a `completed`-status `fileChange` item. A
+   * `declined`/`failed`/`inProgress` item is silently skipped — this is not a
+   * protocol deviation, just a change that did not (yet, or ever) happen
+   * (measured: see the Agent Note). `turn/diff/updated` (also observed on the
+   * real app-server) is deliberately not used: it carries an unstructured
+   * unified-diff blob for the whole turn, while this per-item, per-path,
+   * status-qualified shape is what {@link SubagentResult.changedFiles}
+   * actually needs.
+   */
+  private observeFileChange(item: JsonObject): void {
+    if (item.status !== 'completed') return
+    const changes = item.changes
+    if (!Array.isArray(changes)) {
+      const message = 'subagent-codex: app-server returned invalid fileChange changes'
+      throw new ClassifiedSubagentFailure(message, { code: 'protocol', message })
+    }
+    for (const change of changes) {
+      const record = object(change, 'item/completed fileChange change')
+      this.changedFilePaths.add(string(record.path, 'item/completed fileChange path'))
+    }
+  }
+
+  /**
+   * Overwrite the retained usage with this notification's cumulative `total`
+   * — never merged or summed with the previous value (measured: see the
+   * Agent Note).
+   */
+  private observeTokenUsage(params: JsonObject): void {
+    const tokenUsage = object(params.tokenUsage, 'thread/tokenUsage/updated tokenUsage')
+    const total = object(tokenUsage.total, 'thread/tokenUsage/updated tokenUsage.total')
+    this.retainedUsage = {
+      inputTokens: number(total.inputTokens, 'thread/tokenUsage/updated tokenUsage.total.inputTokens'),
+      outputTokens: number(total.outputTokens, 'thread/tokenUsage/updated tokenUsage.total.outputTokens'),
+      cacheReadTokens: number(total.cachedInputTokens, 'thread/tokenUsage/updated tokenUsage.total.cachedInputTokens'),
+      cacheWriteTokens: number(total.cacheWriteInputTokens, 'thread/tokenUsage/updated tokenUsage.total.cacheWriteInputTokens'),
+    }
+  }
+
   private handleServerRequest(method: string, params: JsonObject): Promise<unknown> {
     try {
       switch (method) {
@@ -490,6 +565,10 @@ export class CodexAppServerWire {
       }
       if (id !== this.turnId) return
       const item = object(params.item, 'item/completed item')
+      if (item.type === 'fileChange') {
+        this.observeFileChange(item)
+        return
+      }
       if (item.type !== 'agentMessage') return
       const text = typeof item.text === 'string'
         ? item.text
@@ -518,6 +597,12 @@ export class CodexAppServerWire {
         if (id !== this.turnId) return
       }
       this.observeErrorNotification(params)
+      return
+    }
+    if (method === 'thread/tokenUsage/updated') {
+      const threadId = string(params.threadId, 'thread/tokenUsage/updated thread id')
+      if (threadId !== this.threadId) return
+      this.observeTokenUsage(params)
       return
     }
     if (method !== 'turn/completed') return

@@ -360,6 +360,77 @@ interface SubagentResult {
    * -authenticated LLM service and has no separate child identity to report.
    */
   readonly authMode?: 'subscription' | 'api-key'
+  /**
+   * Absolute paths of files the child actually wrote, created, or deleted
+   * during this run, deduplicated, or absent when the provider observed none
+   * (including every in-process provider, which never populates this field —
+   * see below). Both out-of-process providers report ONLY a successful
+   * change: Codex from an `item/completed` `fileChange` item whose own
+   * `status` is `'completed'` (never a `declined`/`failed`/`inProgress` one);
+   * Claude from a `Write`/`Edit`/`NotebookEdit` `tool_use` block whose
+   * matching `tool_result` reports no error AND whose id is absent from
+   * `SDKResultMessage.permission_denials` — a denied or failed call is never
+   * reported (a naive `tool_use`-only collector would misreport a read-only
+   * run as having written files; see the Agent Note). Claude resolves a
+   * relative `tool_use` path against the child's own working directory before
+   * reporting it (Claude's `file_path`/`notebook_path` argument can be
+   * relative to the child's cwd despite the SDK's own type documentation
+   * saying absolute — measured, see the Agent Note); Codex's `fileChange`
+   * path already arrives absolute. Present only for a `completed` or
+   * `max-tokens` result; an `aborted` or unclassified `error` result does not
+   * carry partial file accounting (Known Limitations). A change a child made
+   * through `Bash`/shell has no inspectable path argument and is never
+   * reported by Claude; Codex's OS-level sandbox still captures a shell
+   * write's effect as its own `fileChange` item.
+   */
+  readonly changedFiles?: readonly string[]
+  /**
+   * Token usage for this run, normalized to {@link SubagentUsage}'s common
+   * meaning, or absent when the provider observed none. Present only for a
+   * `completed` or `max-tokens` result (same scope as {@link changedFiles});
+   * an `aborted` or unclassified `error` result does not carry partial usage
+   * accounting (Known Limitations). Codex retains only the LAST observed
+   * `thread/tokenUsage/updated` notification's cumulative `total` — the
+   * app-server fires this notification several times per turn, each carrying
+   * the run's running total, not a per-notification delta; summing them
+   * double-counts (measured, see the Agent Note).
+   */
+  readonly usage?: SubagentUsage
+}
+```
+
+`changedFiles` and `usage` are populated only by the out-of-process product providers, following the same optional-fact pattern as `failure`/`authMode` — see the [changed-files-and-usage Agent Note](../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-changed-files-and-usage.md). `SubagentUsage` normalizes both providers' token accounting to one common, cache-inclusive `inputTokens` meaning:
+
+```ts type-equiv
+/**
+ * Token accounting common to both out-of-process product providers, using ONE
+ * normalized meaning per field so a consumer never needs to know which
+ * provider produced it. Measured against real Codex `thread/tokenUsage/updated`
+ * and Claude `SDKResultMessage.usage` (see the
+ * [Agent Note](../../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-changed-files-and-usage.md)):
+ * Codex's own `inputTokens` already INCLUDES its `cachedInputTokens` subset
+ * (`totalTokens = inputTokens + outputTokens`), while Claude's own
+ * `usage.input_tokens` EXCLUDES `cache_creation_input_tokens` and
+ * `cache_read_input_tokens` (they are separate, additive counts). `inputTokens`
+ * below is defined as the CACHE-INCLUSIVE total — Codex needs no adjustment;
+ * Claude's three native fields are summed to reach it. Neither provider's
+ * money field (Codex has none; Claude has `total_cost_usd`) is in this
+ * contract — it is provider-specific, not a common meaning.
+ */
+interface SubagentUsage {
+  /**
+   * Total input tokens the model processed for this run, INCLUSIVE of any
+   * cache read or cache write portion counted in {@link cacheReadTokens} and
+   * {@link cacheWriteTokens} below (both are subsets of this total, never
+   * additional to it).
+   */
+  readonly inputTokens: number
+  /** Output tokens the model produced. Provider-native; neither provider needs adjustment. */
+  readonly outputTokens: number
+  /** Of {@link inputTokens}, how many were served from a cache entry this run did not itself create. */
+  readonly cacheReadTokens: number
+  /** Of {@link inputTokens}, how many were newly written to a cache entry during this run. */
+  readonly cacheWriteTokens: number
 }
 ```
 
@@ -707,7 +778,7 @@ async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 
 Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:174`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:175`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagent-events"></a>
 
@@ -733,7 +804,7 @@ A published child settled. Scope-filtered dispatch uses the same delegating pare
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:169`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:170`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-added--emit"></a>
 
@@ -750,7 +821,7 @@ A provider became resolvable in the registry.
 'subagent/provider-added'(provider: SubagentProvider): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:143`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:144`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-removed--emit"></a>
 
@@ -767,7 +838,7 @@ A provider left the registry. Accepted runs remain holder-owned.
 'subagent/provider-removed'(name: string): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:149`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:150`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentstart--emit"></a>
 
@@ -791,5 +862,5 @@ A provider established a published child. For in-process providers, `ctx.agents.
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:160`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:161`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

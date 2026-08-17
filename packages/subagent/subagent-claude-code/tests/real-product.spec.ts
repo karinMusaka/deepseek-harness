@@ -13,6 +13,7 @@ import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type {
+  SDKAssistantMessage,
   Query,
   SDKMessage,
   SDKSystemMessage,
@@ -262,6 +263,9 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `ANTHROPIC_API_KEY`.
       authMode: 'api-key',
+      // The fixture's own declared `usage` (message_start `input_tokens: 7`,
+      // message_delta `output_tokens: 1`) reaches the result verbatim; no cache.
+      usage: { inputTokens: 7, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     await run.dispose()
 
@@ -364,6 +368,7 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
       output: [{ type: 'text', text: 'read the probe file' }],
       stopReason: 'completed',
       authMode: 'api-key',
+      usage: { inputTokens: 14, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     await run.dispose()
 
@@ -385,6 +390,11 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
       output: [{ type: 'text', text: 'both attempts were denied' }],
       stopReason: 'completed',
       authMode: 'api-key',
+      usage: { inputTokens: 21, outputTokens: 11, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // No `changedFiles`: both the denied Write and the denied Bash bypass
+      // never wrote — the denial exclusion (positive tool_result evidence
+      // required) covers Write, and Bash has no inspectable path argument at
+      // all (see Known Limitations).
     })
     await run.dispose()
 
@@ -408,11 +418,53 @@ describe('real Claude Agent SDK permission scope (fixed at delegation)', { timeo
       output: [{ type: 'text', text: 'created the file' }],
       stopReason: 'completed',
       authMode: 'api-key',
+      usage: { inputTokens: 14, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // The real CLI actually created the file at the fixture's own absolute
+      // `file_path` argument; the matching non-error `tool_result` (the
+      // second Messages request) is the positive success evidence this
+      // collector requires.
+      changedFiles: [join(harness.workspace, 'marker.txt')],
     })
     await run.dispose()
 
     expect(existsSync(join(harness.workspace, 'marker.txt'))).toBe(true)
     expect(readFileSync(join(harness.workspace, 'marker.txt'), 'utf8')).toBe('WROTE')
+    expect(fixture.requests).toHaveLength(2)
+    await expectQuiescent(harness.handles)
+  })
+
+  it('resolves a RELATIVE Write file_path against the child\'s cwd and reports it absolute (regression: measured raw model output can be relative)', async () => {
+    // Measured against the real SDK: the model's own `tool_use.input.file_path`
+    // can be relative (e.g. `"made.txt"`) despite the SDK's type documentation
+    // saying "The absolute path to the file to modify" — the real CLI resolves
+    // it against its own cwd before executing, but the observed `tool_use`
+    // block itself carries the raw (relative) value verbatim. See the Agent Note.
+    const { harness, fixture } = await realHarness(() => [
+      { kind: 'toolUse', name: 'Write', input: { file_path: 'made.txt', content: 'WROTE' } },
+      { kind: 'complete', text: 'created the file' },
+    ])
+    const run = await startRequest(harness, 'Create made.txt.', undefined, 'workspace-write')
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'created the file' }],
+      stopReason: 'completed',
+      authMode: 'api-key',
+      usage: { inputTokens: 14, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      changedFiles: [join(harness.workspace, 'made.txt')],
+    })
+    await run.dispose()
+
+    expect(existsSync(join(harness.workspace, 'made.txt'))).toBe(true)
+    expect(readFileSync(join(harness.workspace, 'made.txt'), 'utf8')).toBe('WROTE')
+    // The wire-observed tool_use block itself keeps the raw relative value —
+    // only the reported `changedFiles` entry above is resolved to absolute.
+    const rawToolUse = observedSdkMessages.find(
+      (message): message is SDKAssistantMessage => message.type === 'assistant'
+        && message.message.content.some(block => block.type === 'tool_use' && block.name === 'Write'),
+    )
+    const writeBlock = rawToolUse?.message.content.find(
+      (block): block is Extract<typeof block, { type: 'tool_use' }> => block.type === 'tool_use' && block.name === 'Write',
+    )
+    expect((writeBlock?.input as { file_path?: unknown } | undefined)?.file_path).toBe('made.txt')
     expect(fixture.requests).toHaveLength(2)
     await expectQuiescent(harness.handles)
   })

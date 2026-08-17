@@ -260,6 +260,39 @@ function turnCompleted(
   }
 }
 
+/** One `item/completed` `fileChange` notification, matching the real app-server's measured shape. */
+function fileChangeItem(
+  status: unknown,
+  changes: unknown = [{ path: '/workspace/made.txt', kind: { type: 'add' }, diff: 'WROTE\n' }],
+  turnId = 'turn-1',
+  threadId = 'thread-1',
+): JsonObject {
+  return {
+    method: 'item/completed',
+    params: {
+      threadId,
+      turnId,
+      item: { type: 'fileChange', id: 'exec-fixture', changes, status },
+    },
+  }
+}
+
+/** One `thread/tokenUsage/updated` notification, matching the real app-server's measured shape. */
+function tokenUsageUpdated(
+  total: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number },
+  turnId = 'turn-1',
+  threadId = 'thread-1',
+): JsonObject {
+  return {
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId,
+      turnId,
+      tokenUsage: { total, last: total, modelContextWindow: 258400 },
+    },
+  }
+}
+
 /** One intermediate `error` notification, matching the app-server's own shape. */
 function errorNotification(
   error: { message: string; codexErrorInfo: unknown; additionalDetails?: unknown },
@@ -1138,6 +1171,161 @@ describe('CodexAppServerWire', () => {
       wire.close()
       child.toChild.emit('error', new Error('late stdin close'))
     }
+  })
+
+  it('reports only `completed`-status fileChange items as absolute changedFiles paths (regression: a denied/declined/in-progress item must never be reported)', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      fileChangeItem('inProgress', [{ path: '/workspace/in-progress.txt', kind: { type: 'add' }, diff: '' }]),
+      fileChangeItem('declined', [{ path: '/workspace/declined.txt', kind: { type: 'add' }, diff: '' }]),
+      fileChangeItem('failed', [{ path: '/workspace/failed.txt', kind: { type: 'add' }, diff: '' }]),
+      fileChangeItem('completed', [{ path: '/workspace/made.txt', kind: { type: 'add' }, diff: 'WROTE\n' }]),
+      agentMessage('created the file', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'created the file' }],
+      stopReason: 'completed',
+      changedFiles: ['/workspace/made.txt'],
+    })
+    wire.close()
+  })
+
+  it('dedupes repeated completed fileChange paths and preserves first-observed order', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      fileChangeItem('completed', [{ path: '/workspace/a.txt', kind: { type: 'add' }, diff: 'A\n' }]),
+      fileChangeItem('completed', [{ path: '/workspace/b.txt', kind: { type: 'add' }, diff: 'B\n' }]),
+      fileChangeItem('completed', [{ path: '/workspace/a.txt', kind: { type: 'update' }, diff: 'A2\n' }]),
+      agentMessage('done', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'done' }],
+      stopReason: 'completed',
+      changedFiles: ['/workspace/a.txt', '/workspace/b.txt'],
+    })
+    wire.close()
+  })
+
+  it('rejects a malformed fileChange changes array as a protocol failure', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(fileChangeItem('completed', 'not-an-array'))
+    await expect(result).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'protocol' },
+    })
+    wire.close()
+  })
+
+  it('rejects a malformed thread/tokenUsage/updated total field as a protocol failure', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        tokenUsage: {
+          // A non-number inputTokens is the measured shape deviation this
+          // validator exists to reject — never a value this run should ever
+          // silently treat as zero or drop.
+          total: { inputTokens: 'not-a-number', outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+        },
+      },
+    })
+    await expect(result).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'protocol' },
+    })
+    wire.close()
+  })
+
+  it('ignores a thread/tokenUsage/updated notification scoped to a different thread', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      // Wrong thread: must be ignored, not retained as this run's usage.
+      tokenUsageUpdated({ inputTokens: 999, outputTokens: 999, cachedInputTokens: 0, cacheWriteInputTokens: 0 }, 'turn-1', 'other-thread'),
+      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
+      agentMessage('answer', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    wire.close()
+  })
+
+  it('retains only the LAST observed cumulative thread/tokenUsage/updated total, never summing (regression: double-counting)', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
+      tokenUsageUpdated({ inputTokens: 57868, outputTokens: 107, cachedInputTokens: 40448, cacheWriteInputTokens: 0 }),
+      agentMessage('answer', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      // The LAST notification's own total (57975 = 57868 + 107), not the sum
+      // of both notifications' totals (a double-count would report 68080).
+      usage: { inputTokens: 57868, outputTokens: 107, cacheReadTokens: 40448, cacheWriteTokens: 0 },
+    })
+    wire.close()
+  })
+
+  it('attaches changedFiles/usage to a max-tokens result exactly like a completed one', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      fileChangeItem('completed'),
+      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
+      agentMessage('partial', null),
+      turnCompleted('failed', 'turn-1', 'thread-1', { message: 'ctx', codexErrorInfo: 'contextWindowExceeded' }),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'partial' }],
+      stopReason: 'max-tokens',
+      changedFiles: ['/workspace/made.txt'],
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    wire.close()
+  })
+
+  it('reports no changedFiles for a read-only run that never produced a fileChange item', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      agentMessage('nothing to change here', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    const settled = await result
+    expect(settled.changedFiles).toBeUndefined()
+    expect(settled.usage).toBeUndefined()
+    wire.close()
   })
 })
 

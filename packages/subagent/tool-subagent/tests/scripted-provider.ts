@@ -11,6 +11,7 @@ import type {
   SubagentRun,
   SubagentStartRequest,
   SubagentStopReason,
+  SubagentUsage,
 } from '@deepseek-ai/dsh-subagent'
 
 const DEFAULT_CAPABILITIES: SubagentCapabilities = {
@@ -39,6 +40,10 @@ export interface Config {
   failure?: SubagentFailureDetail
   /** `authMode` attached to the result. */
   authMode?: SubagentResult['authMode']
+  /** `changedFiles` attached to the result. */
+  changedFiles?: readonly string[]
+  /** `usage` attached to the result. */
+  usage?: SubagentUsage
   /** Observes each start; the child's result additionally waits for the returned promise. */
   onStart?: (request: SubagentStartRequest) => Promise<void> | void
 }
@@ -77,6 +82,8 @@ class ScriptedSubagentProvider implements SubagentProvider {
       stopReason: state.cancelled ? 'aborted' : stopReason,
       ...!state.cancelled && this.config.failure !== undefined ? { failure: this.config.failure } : {},
       ...this.config.authMode !== undefined ? { authMode: this.config.authMode } : {},
+      ...!state.cancelled && this.config.changedFiles !== undefined ? { changedFiles: [...this.config.changedFiles] } : {},
+      ...!state.cancelled && this.config.usage !== undefined ? { usage: this.config.usage } : {},
     })
     const gate = Promise.resolve(this.config.onStart?.(request))
     const result = gate.then(() => new Promise<SubagentResult>((resolve) => {

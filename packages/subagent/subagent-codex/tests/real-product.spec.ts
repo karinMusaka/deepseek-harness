@@ -54,7 +54,10 @@ interface RealHarness {
   readonly workspace: string
 }
 
-async function realHarness(script: readonly ResponsesBehavior[]): Promise<{
+async function realHarness(
+  script: readonly ResponsesBehavior[],
+  options: { readonly model?: string } = {},
+): Promise<{
   readonly harness: RealHarness
   readonly fixture: ResponsesFixture
 }> {
@@ -67,7 +70,11 @@ async function realHarness(script: readonly ResponsesBehavior[]): Promise<{
   mkdirSync(workspace)
   mkdirSync(codexHome)
   writeFileSync(join(codexHome, 'config.toml'), [
-    'model = "fixture-model"',
+    // `apply_patch` exposed as its own `custom_tool_call` tool (rather than
+    // "unsupported call: apply_patch") requires a model family codex-core
+    // recognizes; the default fixture model name is deliberately unknown to
+    // exercise the fallback-metadata path elsewhere in this suite.
+    `model = "${options.model ?? 'fixture-model'}"`,
     'model_provider = "fixture"',
     'approval_policy = "on-request"',
     'sandbox_mode = "read-only"',
@@ -164,6 +171,9 @@ describe('real @openai/codex 0.147.0 product', () => {
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
       authMode: 'api-key',
+      // One Responses call in this turn: the app-server's own `thread/tokenUsage/updated`
+      // total equals that one call's own declared usage.
+      usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     await run.dispose()
 
@@ -224,6 +234,11 @@ describe('real @openai/codex 0.147.0 product', () => {
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
       authMode: 'api-key',
+      // Two Responses calls this turn (the rejected function call, then the
+      // acknowledgement): `thread/tokenUsage/updated`'s cumulative total sums
+      // both calls' own declared usage — this is the LAST observed value, not
+      // a value this test double-sums itself.
+      usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     await run.dispose()
 
@@ -341,6 +356,7 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
       authMode: 'api-key',
+      usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     await run.dispose()
 
@@ -368,6 +384,9 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
       authMode: 'api-key',
+      usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // No `changedFiles`: a plain shell write produces only a `commandExecution`
+      // item, never `fileChange` — see Known Limitations and the Agent Note.
     })
     await run.dispose()
 
@@ -399,11 +418,80 @@ describe('real @openai/codex 0.147.0 permission scope (fixed at delegation)', ()
       stopReason: 'completed',
       // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
       authMode: 'api-key',
+      usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // No `changedFiles`: this scripted write is a plain shell `printf`, which
+      // Codex reports only as a `commandExecution` item — never `fileChange`
+      // (measured; see Known Limitations and the Agent Note). The dedicated
+      // real-file-change test below drives the same effect through Codex's own
+      // `apply_patch` tool, which IS reported.
     })
     await run.dispose()
 
     expect(existsSync(marker)).toBe(true)
     expect(readFileSync(marker, 'utf8')).toBe('WROTE')
+    expect(fixture.requests).toHaveLength(2)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('a workspace-write child creating a file through apply_patch reports its absolute path in changedFiles', async () => {
+    // `apply_patch` is Codex's own dedicated file-edit tool (a `custom_tool_call`
+    // Responses item, not a JSON-arguments `function_call`); codex-core reports
+    // the resulting write as an `item/completed` `fileChange` item on the
+    // app-server protocol — measured only through this path, never through a
+    // plain shell write (see the test above and the Agent Note).
+    const patchText = ['*** Begin Patch', '*** Add File: made.txt', '+WROTE', '*** End Patch', ''].join('\n')
+    const { harness, fixture } = await realHarness([
+      { kind: 'customToolCall', name: 'apply_patch', input: patchText },
+      { kind: 'complete', text: 'created the file' },
+    ], { model: 'gpt-5.2-codex' })
+    const made = join(harness.workspace, 'made.txt')
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Create made.txt with apply_patch.' }],
+      parent: harness.parent,
+      permissionMode: 'workspace-write',
+      signal: new AbortController().signal,
+    })
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'created the file' }],
+      stopReason: 'completed',
+      // realHarness's env sets a credential-shaped `OPENAI_API_KEY`.
+      authMode: 'api-key',
+      usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // The app-server's own `fileChange` item path is already absolute — no
+      // resolution needed (unlike Claude's tool_use `file_path`; see the Agent Note).
+      changedFiles: [made],
+    })
+    await run.dispose()
+
+    expect(existsSync(made)).toBe(true)
+    expect(readFileSync(made, 'utf8')).toBe('WROTE\n')
+    expect(fixture.requests).toHaveLength(2)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('a read-only child cannot create a file through apply_patch, and reports no changedFiles', async () => {
+    // Measured: the OS sandbox rejects the write before codex-core ever emits
+    // a `fileChange` item at all (not a `declined`-status item) — the
+    // `status === 'completed'` filter and this "no item ever arrives" case
+    // both converge on the same safe outcome: nothing reported.
+    const patchText = ['*** Begin Patch', '*** Add File: made.txt', '+WROTE', '*** End Patch', ''].join('\n')
+    const { harness, fixture } = await realHarness([
+      { kind: 'customToolCall', name: 'apply_patch', input: patchText },
+      { kind: 'complete', text: 'attempted the write' },
+    ], { model: 'gpt-5.2-codex' })
+    const made = join(harness.workspace, 'made.txt')
+    const run = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Create made.txt with apply_patch.' }],
+      parent: harness.parent,
+      permissionMode: 'read-only',
+      signal: new AbortController().signal,
+    })
+    const result = await run.result
+    await run.dispose()
+
+    expect(result.stopReason).toBe('completed')
+    expect(result.changedFiles).toBeUndefined()
+    expect(existsSync(made)).toBe(false)
     expect(fixture.requests).toHaveLength(2)
     await expectQuiescent(harness.handles)
   }, 60_000)

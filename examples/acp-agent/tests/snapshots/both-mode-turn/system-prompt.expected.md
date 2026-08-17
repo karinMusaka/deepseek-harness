@@ -375,6 +375,13 @@ interface ToolOutputMap {
     kind: "foreground";
     runId: string;
     output: JsonValue[];
+    changedFiles?: string[];
+    usage?: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+    };
   };
   subagent_fork: {
     kind: "background";
@@ -386,6 +393,13 @@ interface ToolOutputMap {
     kind: "foreground";
     runId: string;
     output: JsonValue[];
+    changedFiles?: string[];
+    usage?: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+    };
   };
   todo_write: {
     todos: ({

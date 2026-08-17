@@ -29,6 +29,11 @@ export type ResponsesBehavior =
       readonly arguments: Record<string, unknown>
     }[]
   }
+  | {
+    readonly kind: 'customToolCall'
+    readonly name: string
+    readonly input: string
+  }
   | { readonly kind: 'hold' }
   | { readonly kind: 'unauthorized' }
 
@@ -206,6 +211,68 @@ function functionCallEvents(
   ]
 }
 
+/**
+ * Build the minimal Responses SSE event sequence for a `custom_tool_call`
+ * output item (measured shape: `apply_patch` is exposed this way, not as a
+ * JSON-arguments `function_call` — its `input` is the raw patch text, never
+ * JSON-encoded). Codex intercepts the `apply_patch` name specifically and
+ * reports the resulting write as an `item/completed` `fileChange` on the
+ * app-server protocol, which `functionCallEvents`'s shell-exec path does not.
+ * @param name - the custom tool name (`apply_patch` for the measured path).
+ * @param input - the raw (non-JSON-encoded) tool input text.
+ * @returns ordered response lifecycle events.
+ */
+function customToolCallEvents(name: string, input: string): Record<string, unknown>[] {
+  const item = {
+    id: 'ctc_fixture',
+    type: 'custom_tool_call',
+    status: 'completed',
+    call_id: 'call_fixture',
+    name,
+    input,
+  }
+  const completed = {
+    ...responseObject(''),
+    output: [item],
+    usage: {
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 15,
+    },
+  }
+  return [
+    {
+      type: 'response.created',
+      response: { ...completed, status: 'in_progress', output: [] },
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { ...item, status: 'in_progress', input: '' },
+    },
+    {
+      type: 'response.custom_tool_call_input.delta',
+      item_id: item.id,
+      output_index: 0,
+      delta: input,
+    },
+    {
+      type: 'response.custom_tool_call_input.done',
+      item_id: item.id,
+      output_index: 0,
+      input,
+    },
+    {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item,
+    },
+    { type: 'response.completed', response: completed },
+  ]
+}
+
 function readRequest(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = ''
@@ -311,6 +378,8 @@ export async function startResponsesFixture(
       let events: Record<string, unknown>[]
       if (behavior.kind === 'complete') {
         events = completeResponsesEvents(behavior.text)
+      } else if (behavior.kind === 'customToolCall') {
+        events = customToolCallEvents(behavior.name, behavior.input)
       } else {
         const call = behavior.kind === 'functionCall'
           ? behavior

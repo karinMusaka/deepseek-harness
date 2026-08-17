@@ -152,6 +152,69 @@ describe('dsh-tool-subagent', () => {
     expect(text(result)).toBe('child says hi')
   })
 
+  it('surfaces changedFiles and usage in the model-visible result when the provider reports them', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      reply: 'created it',
+      changedFiles: ['/workspace/made.txt'],
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 0 },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected subagent success')
+    expect(result.value).toEqual({
+      kind: 'foreground',
+      runId: 'scripted-subagent:mock:parent-1',
+      output: [{ type: 'text', text: 'created it' }],
+      changedFiles: ['/workspace/made.txt'],
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 0 },
+    })
+    const rendered = text(result)
+    expect(rendered).toContain('created it')
+    expect(rendered).toContain('Files changed:')
+    expect(rendered).toContain('/workspace/made.txt')
+    expect(rendered).toContain('Tokens used: 100 in, 20 out')
+    expect(rendered).toContain('5 cached read')
+  })
+
+  it('renders the cache note from cacheWriteTokens alone when cacheReadTokens is zero', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      reply: 'wrote it',
+      usage: { inputTokens: 50, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 7 },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected subagent success')
+    const rendered = text(result)
+    expect(rendered).toContain('Tokens used: 50 in, 10 out')
+    expect(rendered).toContain('0 cached read, 7 cached write')
+  })
+
+  it('renders usage with no cache note when neither cache field is positive', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      reply: 'no cache activity',
+      usage: { inputTokens: 8, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected subagent success')
+    const rendered = text(result)
+    expect(rendered).toContain('Tokens used: 8 in, 2 out')
+    expect(rendered).not.toContain('cached')
+  })
+
+  it('adds no changedFiles noise for the common empty case (no key, no rendered note)', async () => {
+    const ctx = await setup({ provider: 'mock' }, { reply: 'nothing to change' })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected subagent success')
+    expect(result.value).not.toHaveProperty('changedFiles')
+    expect(result.value).not.toHaveProperty('usage')
+    const rendered = text(result)
+    expect(rendered).toBe('nothing to change')
+    expect(rendered).not.toContain('Files changed')
+    expect(rendered).not.toContain('Tokens used')
+  })
+
   it('exposes description + prompt + run_in_background to the model (no provider/type parameter)', async () => {
     const ctx = await setup({ provider: 'mock' })
     const schema = ctx.tools.schemas().find(s => s.name === 'subagent')

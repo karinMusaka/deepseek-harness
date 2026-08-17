@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type {
   Options,
@@ -38,13 +39,17 @@ import {
 import {
   claudeFailureMessage,
   claudeQueryOptions,
+  claudeUsage,
   classifyAssistantError,
   classifyClaudeFailure,
   consumeClaudeQuery,
+  deniedToolUseIds,
   disposeClaudeCodeChild,
   resultFields,
   startClaudeCodeRun,
+  successfulToolResultIds,
   textTask,
+  writeToolUseCandidate,
   type ClaudeCodeRunSpec,
 } from '../src/run.ts'
 
@@ -751,12 +756,13 @@ describe('query options and result mapping', () => {
       success('first'),
       success('last'),
     ])
-    await expect(consumeClaudeQuery(query)).resolves.toEqual({
+    await expect(consumeClaudeQuery(query, process.cwd())).resolves.toEqual({
       output: [{ type: 'text', text: 'last' }],
       stopReason: 'completed',
     })
     await expect(consumeClaudeQuery(
       queryFrom([{ type: 'system', subtype: 'init' } as SDKMessage]),
+      process.cwd(),
     )).rejects.toThrow('ended without a result')
   })
 
@@ -765,7 +771,7 @@ describe('query options and result mapping', () => {
       { type: 'assistant', error: 'max_output_tokens' } as unknown as SDKMessage,
       failure('error_during_execution', ['generic failure']),
     ])
-    const result = await consumeClaudeQuery(query).catch((error: unknown) => error)
+    const result = await consumeClaudeQuery(query, process.cwd()).catch((error: unknown) => error)
     expect(result).toBeInstanceOf(Error)
     // `max_output_tokens` is not retained: the terminal failure falls through
     // to the generic `provider` default, not some retained (nonexistent) class.
@@ -777,8 +783,260 @@ describe('query options and result mapping', () => {
       { type: 'assistant', error: 'authentication_failed' } as unknown as SDKMessage,
       failure('error_during_execution', ['Not logged in · Please run /login']),
     ])
-    const result = await consumeClaudeQuery(query).catch((error: unknown) => error)
+    const result = await consumeClaudeQuery(query, process.cwd()).catch((error: unknown) => error)
     expect((result as { failure?: { code: string } }).failure?.code).toBe('auth')
+  })
+
+  it('collects a write-tool changed file only once its tool_result reports success', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_write', is_error: false }] },
+      } as unknown as SDKMessage,
+      success('created the file'),
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toEqual([resolve(cwd, 'made.txt')])
+  })
+
+  it('excludes a write-tool candidate whose tool_result reports an error', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_write', is_error: true }] },
+      } as unknown as SDKMessage,
+      success('the write failed'),
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toBeUndefined()
+  })
+
+  it('excludes a write-tool candidate present in permission_denials even with a spurious successful tool_result', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_write', is_error: false }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'denied anyway',
+        permission_denials: [{ tool_name: 'Write', tool_use_id: 'toolu_write', tool_input: {} }],
+      } as unknown as SDKMessage,
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toBeUndefined()
+  })
+
+  it('never reports a tool_use candidate that has no matching tool_result at all', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      success('done'),
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toBeUndefined()
+  })
+
+  it('resolves a relative Write path against cwd and reports usage from the terminal result', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_write', is_error: false }] },
+      } as unknown as SDKMessage,
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'created the file',
+        usage: { input_tokens: 4, output_tokens: 95, cache_creation_input_tokens: 51513, cache_read_input_tokens: 0 },
+      } as unknown as SDKMessage,
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toEqual([resolve(cwd, 'made.txt')])
+    expect(result.usage).toEqual({
+      inputTokens: 4 + 51513 + 0,
+      outputTokens: 95,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 51513,
+    })
+  })
+
+  it('is absent when the terminal result carries no usage at all', async () => {
+    const result = await consumeClaudeQuery(queryFrom([success('answer')]), process.cwd())
+    expect(result.usage).toBeUndefined()
+  })
+
+  it('tolerates a user message whose message.content is a plain string (no tool results, the common case)', async () => {
+    const cwd = process.cwd()
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_write', name: 'Write', input: { file_path: 'made.txt', content: 'x' } }] },
+      } as unknown as SDKMessage,
+      // The real SDK types `SDKUserMessage.message.content` as
+      // `string | Array<ContentBlockParam>` — a plain string, not an array,
+      // is the ordinary shape for a ping-pong turn with no tool results at
+      // all. This must not crash and must not count as a success.
+      {
+        type: 'user',
+        message: { content: 'ordinary user turn text, no tool results' },
+      } as unknown as SDKMessage,
+      success('done'),
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toBeUndefined()
+  })
+
+  it('deduplicates two write-tool candidates that resolve to the same absolute path', async () => {
+    const cwd = process.cwd()
+    const absolute = resolve(cwd, 'made.txt')
+    const query = queryFrom([
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            // A relative candidate and an already-absolute candidate for the
+            // SAME file, from two distinct tool_use ids — both succeed, so
+            // the dedup at the reporting step (not the candidate map, which
+            // is already keyed by id) must collapse them to one entry.
+            { type: 'tool_use', id: 'toolu_first', name: 'Write', input: { file_path: 'made.txt', content: 'x' } },
+            { type: 'tool_use', id: 'toolu_second', name: 'Edit', input: { file_path: absolute, old_string: 'x', new_string: 'y' } },
+          ],
+        },
+      } as unknown as SDKMessage,
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_first', is_error: false },
+            { type: 'tool_result', tool_use_id: 'toolu_second', is_error: false },
+          ],
+        },
+      } as unknown as SDKMessage,
+      success('edited the file'),
+    ])
+    const result = await consumeClaudeQuery(query, cwd)
+    expect(result.changedFiles).toEqual([absolute])
+  })
+
+  it('claudeUsage() returns undefined for a non-object message, a null/non-object usage, and a non-numeric token field', () => {
+    expect(claudeUsage(null)).toBeUndefined()
+    expect(claudeUsage('not an object')).toBeUndefined()
+    expect(claudeUsage({ usage: null })).toBeUndefined()
+    expect(claudeUsage({ usage: 'not an object' })).toBeUndefined()
+    // usage IS an object, but its token fields are not numbers — distinct
+    // from usage being absent/malformed entirely.
+    expect(claudeUsage({ usage: { input_tokens: 'four', output_tokens: 1 } })).toBeUndefined()
+    expect(claudeUsage({ usage: { input_tokens: 4, output_tokens: 'one' } })).toBeUndefined()
+  })
+
+  it('claudeUsage() defaults absent cache fields to zero rather than requiring them', () => {
+    // input_tokens/output_tokens are the only required fields; a real result
+    // with no cache activity at all omits both cache fields entirely.
+    expect(claudeUsage({ usage: { input_tokens: 4, output_tokens: 5 } })).toEqual({
+      inputTokens: 4,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    })
+  })
+
+  it('writeToolUseCandidate() rejects a non-object block, a non-tool_use block, and a missing/empty id', () => {
+    expect(writeToolUseCandidate(null)).toBeUndefined()
+    expect(writeToolUseCandidate('not an object')).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'text', text: 'hi' })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', name: 'Write', input: { file_path: 'a' } })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: '', name: 'Write', input: { file_path: 'a' } })).toBeUndefined()
+  })
+
+  it('writeToolUseCandidate() rejects a tool name that is not a string or does not name a write-capable tool', () => {
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 42, input: { file_path: 'a' } })).toBeUndefined()
+    // Read-only tools (and Bash) are never write-capable — see WRITE_TOOL_PATH_FIELD.
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Read', input: { file_path: 'a' } })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'ls' } })).toBeUndefined()
+  })
+
+  it('writeToolUseCandidate() rejects a missing, non-object, or array input', () => {
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write' })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: null })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: 'not an object' })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: [] })).toBeUndefined()
+  })
+
+  it('writeToolUseCandidate() rejects a missing, non-string, or empty path argument', () => {
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: {} })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: { file_path: 42 } })).toBeUndefined()
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: { file_path: '' } })).toBeUndefined()
+  })
+
+  it('writeToolUseCandidate() accepts Write/Edit (file_path) and NotebookEdit (notebook_path)', () => {
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'x', name: 'Write', input: { file_path: 'a.txt' } }))
+      .toEqual({ id: 'x', path: 'a.txt' })
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'y', name: 'Edit', input: { file_path: 'b.txt' } }))
+      .toEqual({ id: 'y', path: 'b.txt' })
+    expect(writeToolUseCandidate({ type: 'tool_use', id: 'z', name: 'NotebookEdit', input: { notebook_path: 'c.ipynb' } }))
+      .toEqual({ id: 'z', path: 'c.ipynb' })
+  })
+
+  it('successfulToolResultIds() returns empty for non-array content', () => {
+    expect(successfulToolResultIds('not an array')).toEqual(new Set())
+    expect(successfulToolResultIds(undefined)).toEqual(new Set())
+  })
+
+  it('successfulToolResultIds() skips a null or non-object content element', () => {
+    expect(successfulToolResultIds([
+      null,
+      'not an object',
+      { type: 'tool_result', tool_use_id: 'x', is_error: false },
+    ])).toEqual(new Set(['x']))
+  })
+
+  it('successfulToolResultIds() collects only non-error tool_result blocks', () => {
+    expect(successfulToolResultIds([
+      { type: 'tool_result', tool_use_id: 'a', is_error: false },
+      { type: 'tool_result', tool_use_id: 'b', is_error: true },
+      { type: 'text', text: 'hi' },
+    ])).toEqual(new Set(['a']))
+  })
+
+  it('deniedToolUseIds() tolerates a non-object message and a malformed permission_denials list', () => {
+    expect(deniedToolUseIds(null)).toEqual(new Set())
+    expect(deniedToolUseIds('not an object')).toEqual(new Set())
+    expect(deniedToolUseIds({ permission_denials: 'not an array' })).toEqual(new Set())
+    // Only the well-shaped entries contribute; null and a non-string
+    // tool_use_id are skipped rather than thrown on.
+    expect(deniedToolUseIds({
+      permission_denials: [
+        { tool_use_id: 'toolu_denied' },
+        null,
+        { tool_use_id: 123 },
+      ],
+    })).toEqual(new Set(['toolu_denied']))
   })
 })
 

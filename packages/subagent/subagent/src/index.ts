@@ -85,6 +85,7 @@ export type {
   SubagentStartRequest,
   SubagentStopReason,
   SubagentStopReasonMap,
+  SubagentUsage,
 } from './types.ts'
 export {
   foldSubagentDescriptor,

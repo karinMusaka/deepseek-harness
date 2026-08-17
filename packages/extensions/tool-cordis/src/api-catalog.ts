@@ -4139,7 +4139,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentResult',
-    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n    readonly failure?: SubagentFailureDetail;\n    readonly authMode?: \'subscription\' | \'api-key\';\n}',
+    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n    readonly failure?: SubagentFailureDetail;\n    readonly authMode?: \'subscription\' | \'api-key\';\n    readonly changedFiles?: readonly string[];\n    readonly usage?: SubagentUsage;\n}',
   },
   {
     name: 'SubagentRun',
@@ -4172,6 +4172,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SubagentStopReasonMap',
     declaration: 'export interface SubagentStopReasonMap {\n    completed: \'completed\';\n    aborted: \'aborted\';\n    error: \'error\';\n    \'max-tokens\': \'max-tokens\';\n    refusal: \'refusal\';\n}',
+  },
+  {
+    name: 'SubagentUsage',
+    declaration: 'export interface SubagentUsage {\n    readonly inputTokens: number;\n    readonly outputTokens: number;\n    readonly cacheReadTokens: number;\n    readonly cacheWriteTokens: number;\n}',
   },
   {
     name: 'SubprocessCollect',
