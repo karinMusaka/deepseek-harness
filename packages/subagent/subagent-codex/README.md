@@ -41,7 +41,9 @@ The provider advertises the `permissionMode` and `resume` start-time capabilitie
 
 Production resolves `codex` from `PATH` and uses the host's native Codex configuration and authentication. The plugin does not install Codex, select a model, create `CODEX_HOME`, log in, or probe a version. Credential-shaped ambient variables are removed by the subprocess seam, so an API key intended for the child must be supplied explicitly in `env`; ordinary ambient values such as `PATH` and `HOME` remain available unless overridden.
 
-Shipped profiles load this provider once on the host and start no Codex process until a tool call. Full Agent Presets carry the tool row below with `disabled: true`; copy a preset and remove that field to expose `subagent_codex` only to agents composed from the copy. A custom host composition can still use both rows directly.
+Production `dsh` does not install or mount this optional provider. A Profile that opts in must install `@deepseek-ai/dsh-subagent-codex` and mount it once on the host plane; loading the provider starts no Codex process until a tool call. Full Agent Presets carry a matching product tool row with `disabled: true`; copy a preset and remove that field to expose `subagent_codex` only to agents composed from the copy. Its `one-shot` policy keeps omitted or `false` `run_in_background` calls in the foreground, while explicit `true` returns a parent-owned Job id for `job_output` or `job_kill`. The base host and full presets already provide the generic Job registry and controls.
+
+The standalone composition below shows the complete explicit capability. A Profile based on `@deepseek-ai/dsh-base` keeps its existing Job rows, adds the product provider row, and enables the preset tool row instead of mounting duplicate Job services.
 
 ```yaml
 - id: subagent-codex
@@ -50,13 +52,18 @@ Shipped profiles load this provider once on the host and start no Codex process 
     env:
       OPENAI_API_KEY: !!js process.env.OPENAI_API_KEY
 
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
 - id: tool-subagent-codex
   name: '@deepseek-ai/dsh-tool-subagent'
-  disabled: true
   config:
     provider: codex
     toolName: subagent_codex
-    enableRunInBackground: false
+    backgroundMode: one-shot
     maxDepth: provider-managed
 ```
 
@@ -80,19 +87,19 @@ The child pays for an independent Codex context and turn. Child tokens do not en
 
 Independent of the parent request cache. Reuse depends only on Codex's own provider, model, instructions, tools, and ephemeral-thread request.
 
-### Parent tool result, indirectly
+### Parent scheduling and results, indirectly
 
 #### What the model sees
 
-Through `dsh-tool-subagent`, the parent sees only the selected final Codex answer or the consumer's exact error for a non-completed result. A classified `error` reaches the model as a class-specific headline (e.g. "subagent could not authenticate with its provider: …") plus Codex's own actionable text, screened for credential-shaped patterns. Codex commentary, reasoning, tool activity, stderr, workspace diffs, and product ids are not copied into the parent Session.
+Through `dsh-tool-subagent`, a foreground call gives the parent the selected final Codex answer, its `changedFiles`/`usage` when either was observed, or the consumer's exact error for a non-completed result; a background call first returns a Job id, and the generic job controls later deliver a completion notice, expose the final answer and status through `job_output`, and let `job_kill` request cancellation — `job_output` never carries `changedFiles`/`usage`, which reach the model only on a foreground call. A classified `error` reaches the model as a class-specific headline (e.g. "subagent could not authenticate with its provider: …") plus Codex's own actionable text, screened for credential-shaped patterns. Codex commentary, reasoning, tool activity, stderr, workspace diffs, and product ids are not copied into the parent Session.
 
 #### Token effect
 
-Parent input grows only by the final answer or error retained in the tool result. This provider adds no parent tool schema by itself.
+Foreground input grows by the retained final answer or error. Background input also includes the start acknowledgement, completion notice, and any `job_output`, `job_kill`, or later status results; child tokens still do not enter the parent context. This provider adds no parent tool schema by itself.
 
 #### KV Cache effect
 
-Append-only: the new tool result follows the reusable parent request prefix.
+Append-only: foreground adds one result after the reusable parent prefix, while background appends the Job acknowledgement, notice, and later control or collection results. Background scheduling can add a notice-driven turn, but none of these messages rewrites the earlier prefix.
 
 ## Known Limitations and Deferred Work
 
@@ -100,7 +107,7 @@ Append-only: the new tool result follows the reusable parent request prefix.
 - **Host-managed product installation and account state** — a missing or incompatible `codex`, configuration error, or authentication failure is surfaced as a startup or run error; the plugin provides no installer, login flow, or runtime version gate.
 - **Compatibility is pinned by development evidence** — upgrading from the verified 0.147.0 protocol baseline requires regenerating upstream schema evidence and rerunning handshake, answer-selection, approval, cancellation, keyless real-product, and credentialed DeepSeek nonce tests.
 - **No human approval path** — `approvalPolicy` is always the fixed literal `'never'`; known unattended approval requests are denied and unknown server requests fail closed; deployments cannot configure an allow policy through this package.
-- **Final text, changed files, and usage only** — reasoning, commentary, intermediate messages not selected as the answer, tool traffic, stderr, and the raw unified-diff text of `turn/diff/updated` remain product-local; only the final answer, `changedFiles`, and `usage` cross into the shared result (see "Changed files and usage" above).
+- **Final text, changed files, and usage cross via a foreground call only** — reasoning, commentary, intermediate messages not selected as the answer, tool traffic, stderr, and the raw unified-diff text of `turn/diff/updated` remain product-local; only the final answer, `changedFiles`, and `usage` cross into the shared result on a foreground call (see "Changed files and usage" above), while a background call's Job id, completion notice, and status come from the shared job runtime, not this provider.
 - **No optional shared capability besides `permissionMode` and `resume`** — output schemas, child personas, tool filtering, and harness depth enforcement are rejected by the shared service for this provider.
 - **No wall-clock timeout or side-effect rollback** — the caller cancels long work, and files or external systems changed before cancellation are not restored.
 - **Failure classification is best-effort against an external, open vocabulary** — `codexErrorInfo`'s enum may grow in a future app-server release; an unrecognized value classifies as `provider` rather than failing closed, so a new native cause is never misreported as `auth`/`quota` but may initially classify more coarsely than a later update of this package would.
