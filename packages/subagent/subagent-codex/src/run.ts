@@ -54,6 +54,22 @@ export interface CodexRunSpec {
    * own `~/.codex/config.toml`.
    */
   readonly permissionMode: SubagentPermissionMode
+  /**
+   * Opt-in request that this run's thread remain resumable
+   * (`SubagentStartRequest.requestResume`). Ignored when {@link resumeId} is
+   * set. Default `false`: the shipped default stays `ephemeral: true` on
+   * `thread/start`, exactly as before this capability existed.
+   */
+  readonly requestResume: boolean
+  /**
+   * A resume id from a prior run's {@link SubagentResult.resumeId}
+   * (`SubagentStartRequest.resumeId`), ALREADY authorized by
+   * `SubagentRuntime.start`'s session-log check before this provider ever
+   * sees it (see the [Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)).
+   * When present, `thread/resume` replaces `thread/start`.
+   */
+  readonly resumeId?: string
   /** Explicit deployment/test environment layered after the shared scrub. */
   readonly env: Record<string, string>
   /**
@@ -175,7 +191,12 @@ export async function startCodexRun(
   try {
     wire.start()
     await Promise.race([wire.initialize(request.signal), processFailure])
-    await Promise.race([wire.startThread(spec.cwd, spec.permissionMode, request.signal), processFailure])
+    await Promise.race([
+      spec.resumeId !== undefined
+        ? wire.resumeThread(spec.resumeId, spec.permissionMode, request.signal)
+        : wire.startThread(spec.cwd, spec.permissionMode, request.signal, spec.requestResume),
+      processFailure,
+    ])
   } catch (error: unknown) {
     request.signal.removeEventListener('abort', onAbort)
     try {

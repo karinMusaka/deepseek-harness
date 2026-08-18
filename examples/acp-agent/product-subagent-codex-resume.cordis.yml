@@ -1,0 +1,22 @@
+# Same native Codex product provider and foreground tool row as
+# product-subagent-codex.cordis.yml, but with `allowResume: true` — the first
+# PR5 (opt-in resume) composition to change the model-visible `subagent_codex`
+# schema (adds `resume`/`resume_id` arguments and a `resumeId` result field).
+# The model is told not to call it; the scenario pins the assembled request
+# schema without starting Codex.
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - insert:
+          - id: subagent-codex
+            name: '@deepseek-ai/dsh-subagent-codex'
+          - id: tool-subagent-codex
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: codex
+              toolName: subagent_codex
+              enableRunInBackground: false
+              maxDepth: provider-managed
+              allowResume: true

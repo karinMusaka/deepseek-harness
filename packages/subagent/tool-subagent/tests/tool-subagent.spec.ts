@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { CallId, createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
@@ -21,7 +21,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import * as mock from './scripted-provider.ts'
 import * as tool from '../src/index.ts'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SESSION_FORMAT_VERSION, SessionId, type JsonValue } from '@deepseek-ai/dsh-session'
 
 const testToolSignal = new AbortController().signal
 
@@ -35,7 +35,7 @@ const testToolSignal = new AbortController().signal
 
 /** A minimal parent Agent passed through to the provider request. */
 function fakeAgent(id = 'parent-1'): Agent {
-  return { id: SessionId(id) } as unknown as Agent
+  return { id: SessionId(id), session: { header: {} } } as unknown as Agent
 }
 
 async function setup(toolConfig: tool.Config, mockConfig: Partial<mock.Config> = {}) {
@@ -383,7 +383,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'weird',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => ({
         id: SessionId('weird-child'),
@@ -409,7 +409,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seen = request
@@ -439,7 +439,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'bare',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seen = request
@@ -529,7 +529,7 @@ describe('dsh-tool-subagent', () => {
     // the provider survives.
     ctx.subagents.registerProvider({
       name: 'continuable',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => { throw new Error('lifecycle test does not start a child') },
       prepareContinuable: async () => ({}),
@@ -598,7 +598,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => ({
         id: SessionId('spy-child'),
@@ -621,7 +621,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => ({
         id: SessionId('spy-child'),
@@ -645,7 +645,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => ({
         id: SessionId('spy-child'),
@@ -673,7 +673,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => ({
         id: SessionId('spy-child'),
@@ -700,7 +700,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         if (request.signal.aborted) throw new Error('start aborted')
@@ -739,7 +739,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'spy',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         if (request.signal.aborted) sawAborted()
@@ -803,7 +803,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture2',
-      capabilities: { outputSchema: false, depthLimit: true, toolFilter: true, persona: true, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: true, toolFilter: true, persona: true, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seen = request
@@ -860,7 +860,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture3',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: true, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: true, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seen = request
@@ -890,7 +890,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture4',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seen = request
@@ -915,7 +915,7 @@ describe('dsh-tool-subagent', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'p',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: true, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: true, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: () => { throw new Error('unreachable') },
     })
@@ -954,7 +954,7 @@ describe('dsh-tool-subagent background mode', () => {
     let prepareCalls = 0
     ctx.subagents.registerProvider({
       name: 'resumable',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async request => ({
         id: SessionId('one-shot-child'),
@@ -1045,7 +1045,7 @@ describe('dsh-tool-subagent background mode', () => {
     const parent = ownerAgent(ctx, 'sess-parent')
     ctx.subagents.registerProvider({
       name: 'broken-start',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => { throw new Error('setup failed') },
     })
@@ -1074,7 +1074,7 @@ describe('dsh-tool-subagent background mode', () => {
     const parent = ownerAgent(ctx, 'sess-parent')
     ctx.subagents.registerProvider({
       name: 'pending-start',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: request => new Promise((_resolve, reject) => {
         request.signal.addEventListener('abort', () => { reject(new Error('startup aborted')) }, { once: true })
@@ -1114,7 +1114,7 @@ describe('dsh-tool-subagent background mode', () => {
     let starts = 0
     ctx.subagents.registerProvider({
       name: 'hanging',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         let settle!: (value: { output: { type: 'text'; text: string }[]; stopReason: 'aborted' }) => void
@@ -1261,7 +1261,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
     let survivingChildId: ReturnType<typeof SessionId> | undefined
     ctx.subagents.registerProvider({
       name: 'gated',
-      capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false },
+      capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => { throw new Error('continuable policy must not start a one-shot child') },
       prepareContinuable: async (request) => {
@@ -1336,7 +1336,7 @@ describe('background preflight failure (no orphaned child, by construction)', ()
     let starts = 0
     ctx.subagents.registerProvider({
       name: 'probe',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => {
         starts += 1
@@ -1374,7 +1374,7 @@ describe('depth budget configuration', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture',
-      capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false },
+      capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         requests.push(request)
@@ -1412,7 +1412,7 @@ describe('depth budget configuration', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'no-depth',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => { throw new Error('unreachable') },
     })
@@ -1428,7 +1428,7 @@ describe('depth budget configuration', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'external',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         requests.push(request)
@@ -1452,7 +1452,7 @@ describe('dsh-tool-subagent timeoutSeconds', () => {
   function registerStallingProvider(ctx: Context, name: string): void {
     ctx.subagents.registerProvider({
       name,
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         const result = new Promise<{ output: never[]; stopReason: 'aborted' }>((resolve) => {
@@ -1493,7 +1493,7 @@ describe('dsh-tool-subagent timeoutSeconds', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'plain-start-failure',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async () => { throw new Error('provider misconfigured') },
     })
@@ -1515,7 +1515,7 @@ describe('dsh-tool-subagent timeoutSeconds', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'wedged-start',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: request => new Promise((_resolve, reject) => {
         request.signal.addEventListener('abort', () => { reject(new Error('provider-owned start failure: retry loop aborted')) }, { once: true })
@@ -1557,7 +1557,7 @@ describe('dsh-tool-subagent timeoutSeconds', () => {
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider({
       name: 'capture-signal',
-      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false },
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: false },
       inheritsParentContext: false,
       start: async (request) => {
         seenSignal = request.signal
@@ -1619,5 +1619,276 @@ describe('dsh-tool-subagent timeoutSeconds', () => {
     expect(() => {
       tool.apply(ctx, { provider: 'unused', timeoutSeconds: value })
     }).toThrow(message)
+  })
+})
+
+describe('dsh-tool-subagent resume (PR5, opt-in)', () => {
+  /** A real detached Session (not a fake stub): resume verification scans `session.events`. */
+  function sessionAgent(id: string, cwd = '/workspace'): { agent: Agent; session: Session } {
+    const sessionId = SessionId(id)
+    const session = Session.create(sessionId, undefined, {
+      version: SESSION_FORMAT_VERSION,
+      id: sessionId,
+      createdAt: 0,
+      cwd,
+    })
+    return { agent: { id: sessionId, session } as unknown as Agent, session }
+  }
+
+  /**
+   * Append one complete, valid turn ending in a `tool/result` carrying `meta`
+   * — the exact durable shape `dsh-tool-subagent`'s `presentationMeta` writes
+   * for a real resumable call, reproduced directly here so a security test
+   * can seed "this session already logged a legitimate issuance" without
+   * driving a full model-scripted turn.
+   */
+  function seedResumeIssuance(session: Session, meta: Record<string, JsonValue>): void {
+    const turn = session.events.filter(event => event.type === 'turn/start').length + 1
+    const callId = CallId(`seed-${turn}`)
+    session.append('turn/start', { turn })
+    session.append('step/start', { turn, step: 1 })
+    session.append('assistant/message', {
+      turn,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: callId, name: 'subagent', arguments: '{}' }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn, step: 1, callId, name: 'subagent', arguments: '{}' })
+    session.append('tool/result', {
+      turn,
+      step: 1,
+      message: createToolResultMessage({ callId, content: [{ type: 'text', text: 'seeded' }], isError: false }),
+      meta,
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 1 })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+
+  function registerStallingResumableProvider(ctx: Context, name: string): void {
+    ctx.subagents.registerProvider({
+      name,
+      capabilities: { outputSchema: false, depthLimit: false, toolFilter: false, persona: false, permissionMode: false, resume: true },
+      inheritsParentContext: false,
+      start: async (request) => {
+        const result = new Promise<{ output: never[]; stopReason: 'aborted' }>((resolve) => {
+          request.signal.addEventListener('abort', () => { resolve({ output: [], stopReason: 'aborted' }) }, { once: true })
+        })
+        return { id: SessionId(`${name}-child`), localAgent: undefined, result, dispose: async () => {} }
+      },
+    })
+  }
+
+  it('excludes resume/resume_id from the schema by default — allowResume: false is the shipped default (regression: test 1)', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+    const properties = (schema.parameters as { properties: Record<string, unknown> }).properties
+    expect(properties).not.toHaveProperty('resume')
+    expect(properties).not.toHaveProperty('resume_id')
+  })
+
+  it('rejects allowResume when the provider cannot enforce resume (mount)', async () => {
+    await expect(setup({ provider: 'mock', allowResume: true })).rejects.toThrow(
+      'provider "mock" cannot enforce resume (no resume capability)',
+    )
+  })
+
+  it('rejects allowResume combined with backgroundMode: continuable at load', async () => {
+    await expect(setup(
+      { provider: 'mock', allowResume: true, backgroundMode: 'continuable' },
+      { capabilities: { resume: true } },
+    )).rejects.toThrow('`allowResume` cannot be combined with `backgroundMode: \'continuable\'`')
+  })
+
+  it('adds resume/resume_id to the schema once allowResume is configured against a capable provider', async () => {
+    const ctx = await setup({ provider: 'mock', allowResume: true }, { capabilities: { resume: true } })
+    const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+    const properties = (schema.parameters as { properties: Record<string, { type: string }> }).properties
+    expect(properties.resume?.type).toBe('boolean')
+    expect(properties.resume_id?.type).toBe('string')
+  })
+
+  it('renders no "Resume id" note for a plain call under an allowResume: true composition that never requested resume', async () => {
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      { capabilities: { resume: true }, resumeId: () => 'unreachable-resume-id' },
+    )
+    const { agent } = sessionAgent('resume-not-requested-1')
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' }, { agent })
+    expect(result.isError).toBe(false)
+    expect(text(result)).not.toContain('Resume id')
+  })
+
+  it('reports resumeId and a matching subagentResume meta record for an opted-in fresh call (regression: test 2)', async () => {
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      { capabilities: { resume: true }, resumeId: () => 'scripted-resume-1' },
+    )
+    const { agent } = sessionAgent('resume-meta-1')
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume: true }, { agent })
+    expect(result.isError).toBe(false)
+    expect(text(result)).toContain('Resume id: scripted-resume-1')
+    expect(result.meta).toEqual({
+      subagentResume: {
+        id: 'scripted-resume-1',
+        provider: 'mock',
+        permissionMode: 'read-only',
+        cwd: '/workspace',
+      },
+    })
+  })
+
+  it('never attaches a subagentResume record when allowResume is not configured, even if the provider would report a resumeId', async () => {
+    const ctx = await setup(
+      { provider: 'mock' },
+      // The provider is never asked to resume (no `allowResume`), so it never populates `resumeId`
+      // regardless of this scripting — proving the byte-identical default path end to end.
+      { capabilities: { resume: true }, resumeId: () => 'unreachable-resume-id' },
+    )
+    const { agent } = sessionAgent('resume-meta-off-1')
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' }, { agent })
+    expect(result.isError).toBe(false)
+    // `output.presentationMeta` is omitted from the built `ToolDefinition`
+    // entirely when `allowResume` is not configured (see `defineTool`'s own
+    // conditional spread), so `meta` stays fully absent — byte-identical to
+    // a pre-PR5 subagent call, not merely a `null` placeholder.
+    expect(result.meta).toBeUndefined()
+    expect(text(result)).not.toContain('Resume id')
+  })
+
+  it('resumes using an id this session previously logged, forwarding it to the provider unchanged (regression: test 3)', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      {
+        capabilities: { resume: true },
+        resumeId: request => request.resumeId ?? 'unexpected-fresh-id',
+        onStart: (request) => { requests.push(request) },
+      },
+    )
+    const { agent, session } = sessionAgent('resume-continue-1')
+    seedResumeIssuance(session, {
+      subagentResume: { id: 'prior-resume-1', provider: 'mock', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume_id: 'prior-resume-1' }, { agent })
+    expect(result.isError).toBe(false)
+    expect(requests.at(-1)?.resumeId).toBe('prior-resume-1')
+    expect(text(result)).toContain('Resume id: prior-resume-1')
+  })
+
+  it('fails closed for a resume_id this harness session never issued, never reaching the provider (SECURITY regression: test 4)', async () => {
+    let providerCalls = 0
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      { capabilities: { resume: true }, resumeId: () => 'should-not-be-used', onStart: () => { providerCalls++ } },
+    )
+    const { agent } = sessionAgent('resume-security-1')
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume_id: 'never-issued' }, { agent })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('not issued in this scope by this harness session')
+    expect(providerCalls).toBe(0)
+  })
+
+  it('renders a classified PRE-publication startup failure through the same headline a post-publication failure gets', async () => {
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      {
+        capabilities: { resume: true },
+        startThrows: { code: 'provider', message: 'app-server could not resume the requested thread: unknown thread id' },
+      },
+    )
+    const { agent, session } = sessionAgent('resume-startup-failure-1')
+    seedResumeIssuance(session, {
+      subagentResume: { id: 'some-id', provider: 'mock', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume_id: 'some-id' }, { agent })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent\'s provider failed')
+    expect(text(result)).toContain('unknown thread id')
+  })
+
+  it('fails closed when a same-id, same-provider issuance is resumed under a different scope — a different tool row/permissionMode (SECURITY regression: test 4b)', async () => {
+    let providerCalls = 0
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    await mock.mountScriptedProvider(ctx, {
+      name: 'mock',
+      capabilities: { resume: true, permissionMode: true },
+      onStart: () => { providerCalls++ },
+    })
+    // Two tool rows targeting the SAME provider, differing only in permissionMode.
+    await ctx.plugin(tool, { provider: 'mock', toolName: 'subagent_ro', permissionMode: 'read-only', allowResume: true })
+    await ctx.plugin(tool, { provider: 'mock', toolName: 'subagent_ww', permissionMode: 'workspace-write', allowResume: true })
+    const { agent, session } = sessionAgent('resume-scope-1')
+    // Issued under the read-only row.
+    seedResumeIssuance(session, {
+      subagentResume: { id: 'ro-resume-1', provider: 'mock', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    const result = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: CallId('scope-mismatch-1'),
+      name: 'subagent_ww',
+      arguments: { description: 'd', prompt: 'p', resume_id: 'ro-resume-1' },
+      agent,
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('not issued in this scope by this harness session')
+    expect(providerCalls).toBe(0)
+  })
+
+  it('fails closed when the same id/scope is resumed from a DIFFERENT session (SECURITY regression: test 4b, cwd/session axis)', async () => {
+    let providerCalls = 0
+    const ctx = await setup(
+      { provider: 'mock', allowResume: true },
+      { capabilities: { resume: true }, onStart: () => { providerCalls++ } },
+    )
+    const { session: issuingSession } = sessionAgent('resume-owner-session')
+    seedResumeIssuance(issuingSession, {
+      subagentResume: { id: 'owner-resume-1', provider: 'mock', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    // A DIFFERENT session's own log never recorded this issuance, even though
+    // the id/provider/permissionMode/cwd tuple would otherwise match.
+    const { agent: otherAgent } = sessionAgent('resume-other-session')
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume_id: 'owner-resume-1' }, { agent: otherAgent })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('not issued in this scope by this harness session')
+    expect(providerCalls).toBe(0)
+  })
+
+  it('rejects resume/resume_id combined with run_in_background: true at call time', async () => {
+    const ctx = await setup({ provider: 'mock', allowResume: true }, { capabilities: { resume: true } })
+    const { agent } = sessionAgent('resume-bg-1')
+    const result = await callSubagent(
+      ctx,
+      { description: 'd', prompt: 'p', resume: true, run_in_background: true },
+      { agent },
+    )
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('foreground call')
+  })
+
+  it('applies timeoutSeconds to a resume call exactly like a fresh one (regression: test 7)', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SubagentRuntime)
+    registerStallingResumableProvider(ctx, 'stalls-resumable')
+    await ctx.plugin(tool, {
+      provider: 'stalls-resumable',
+      maxDepth: 'provider-managed',
+      allowResume: true,
+      timeoutSeconds: 0.01,
+    })
+    const { agent, session } = sessionAgent('resume-timeout-1')
+    seedResumeIssuance(session, {
+      subagentResume: { id: 'timeout-resume-1', provider: 'stalls-resumable', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p', resume_id: 'timeout-resume-1' }, { agent })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('subagent run hit its 0.01s time limit before finishing')
   })
 })

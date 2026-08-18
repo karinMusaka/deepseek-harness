@@ -869,6 +869,7 @@ describe('dsh-subagent-acp', () => {
       toolFilter: false,
       persona: false,
       permissionMode: false,
+      resume: false,
     })
   })
 

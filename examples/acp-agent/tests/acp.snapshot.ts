@@ -69,6 +69,9 @@ const BACKGROUND_TASK_ADMISSION_CONFIG = fileURLToPath(
 )
 const PRODUCT_SUBAGENT_CODEX_CONFIG = fileURLToPath(new URL('../product-subagent-codex.cordis.yml', import.meta.url))
 const PRODUCT_SUBAGENT_BOTH_CONFIG = fileURLToPath(new URL('../product-subagent-both.cordis.yml', import.meta.url))
+const PRODUCT_SUBAGENT_CODEX_RESUME_CONFIG = fileURLToPath(
+  new URL('../product-subagent-codex-resume.cordis.yml', import.meta.url),
+)
 const FS_DIFF_BOUND_CONFIG = fileURLToPath(new URL('./fs-diff-bound.cordis.yml', import.meta.url))
 const SNAPSHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
 const PACKED_CHUNKS_SOURCE = 'hook-cc-pretool-deny'
@@ -160,6 +163,20 @@ const SCENARIOS: Scenario[] = [
     headerClass: 'product-subagent-both',
     systemPromptSource: 'product-subagent-codex',
     configPath: PRODUCT_SUBAGENT_BOTH_CONFIG,
+  },
+  // PR5 (opt-in resume): the first composition to change subagent_codex's
+  // model-visible tool schema (`resume`/`resume_id` arguments, `resumeId`
+  // result field). Reuses product-subagent-codex's system prompt — allowResume
+  // does not affect the delegation-guidance prose, only the tool JSON schema —
+  // so only its own tool-schemas fixture is new evidence here.
+  {
+    name: 'product-subagent-codex-resume',
+    hasModelTurn: true,
+    recorded: false,
+    pinsHeader: true,
+    headerClass: 'product-subagent-codex-resume',
+    systemPromptSource: 'product-subagent-codex',
+    configPath: PRODUCT_SUBAGENT_CODEX_RESUME_CONFIG,
   },
   {
     name: 'session-title-after-turn',

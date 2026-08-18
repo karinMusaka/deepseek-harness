@@ -68,9 +68,12 @@ class ClaudeCodeProvider implements SubagentProvider {
   readonly name = 'claude-code'
   // Every other start-time capability stays NO_START_CAPABILITIES's `false`: an
   // out-of-process SDK child cannot honor `outputSchema`/`maxDepth`/
-  // `toolFilter`/`persona`. `permissionMode` is the one exception — the fixed
-  // `canUseTool` allowlist below enforces it.
-  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true }
+  // `toolFilter`/`persona`. `permissionMode` and `resume` are the two
+  // exceptions — the fixed `canUseTool` allowlist below enforces the former,
+  // and the official SDK's own `persistSession`/`Options.resume` enforce the
+  // latter (opt-in only — see the [Agent
+  // Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)).
+  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true, resume: true }
   readonly inheritsParentContext = false
 
   constructor(
@@ -99,6 +102,8 @@ class ClaudeCodeProvider implements SubagentProvider {
       // Absent means the provider's own default (`SubagentStartRequest.permissionMode` JSDoc):
       // fixed here as `read-only`, never left to the host's own Claude settings.
       permissionMode: request.permissionMode ?? 'read-only',
+      requestResume: request.requestResume === true,
+      ...request.resumeId !== undefined ? { resumeId: request.resumeId } : {},
       executable,
       env: this.config.env,
       authMode: resolveAuthMode(this.config.env),

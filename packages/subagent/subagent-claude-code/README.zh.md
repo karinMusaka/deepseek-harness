@@ -26,11 +26,15 @@ SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK �
 
 每次 query 还会设置 `permissionMode: 'default'`，并配置一个固定的 `canUseTool` 来强制执行 `request.permissionMode`（缺省即为 `read-only`，这是该 seam 文档化的提供方默认值）：对于 `read-only`，采用默认拒绝的只读工具名白名单（`Read`、`Glob`、`Grep`、`WebFetch`、`WebSearch`）；对于 `workspace-write`，再加入 `Write`、`Edit`、`NotebookEdit` 与 `Bash`。这是一份白名单而非黑名单——本钉定尚未枚举到的工具（未来 SDK 新增的工具，或已锁定 SDK 与实际安装 CLI 之间的版本漂移）会保持拒绝，而不会失败开放。两种模式下 `disallowedTools: ['AskUserQuestion']` 都保持不变。
 
-每次 query 都设置 `persistSession: false`。提供方不设置 elicitation 或对话回调，因此固定白名单之外的无人值守交互会因 `canUseTool` 拒绝而失败，而不会等待本提供方不负责的用户界面。
+除非该次调用选择了续接（`request.requestResume`/`request.resumeId`——见下文「Resume（可选）」），每次 query 都设置 `persistSession: false`。提供方不设置 elicitation 或对话回调，因此固定白名单之外的无人值守交互会因 `canUseTool` 拒绝而失败，而不会等待本提供方不负责的用户界面。
+
+### Resume（可选）
+
+本提供方声明 `resume` 这一启动时能力。调用方若设置 `request.requestResume: true`，就会把 `persistSession` 设为 `true` 而非默认的 `false`；一次成功的 `completed` 结果随后会携带 `resumeId: message.session_id`，即该次 query 的 SDK 自身会话标识。之后的某次调用若把 `request.resumeId` 设为调用方已经持有的某个值，就会将其作为 SDK 的 `Options.resume` 传入，以续接那个确切的会话而不是重新开始；只要设置了 `resumeId`，就隐含设置了 `persistSession: true`，因此被续接的会话本身依然可续接。`settingSources: []` 与固定的 `canUseTool` 权限范围在续接调用上的强制程度与全新调用完全相同——续接不授予任何额外的信任。`forkSession` 被刻意弃之不用：这一机制要跨调用续接*同一个* `session_id`，而不是从既有历史分叉出一个新会话。从与创建会话时不同的 cwd 续接，或续接一个 SDK 自身存储无法识别的 id，都不是抛出异常——而是一条正常的 `is_error: true` 结果消息，携带可操作的 `errors` 数组（例如 `"No conversation found with session ID: …"`），因此这类失败会流经本提供方*既有*的失败分类路径（见上文「失败分类」），不需要新增任何分类代码。此能力在再上一层被部署门控，即 [`dsh-tool-subagent`](../tool-subagent/README.md#resume-opt-in) 的 `allowResume` 配置项——只有部署方已选择启用时，模型才能请求续接。
 
 ## 能力与上下文
 
-本提供方声明 `permissionMode` 这一启动时能力（如上强制执行），不声明其他任何可选能力，并报告 `inheritsParentContext: false`。Claude Code 会接收独立文本任务、父会话 cwd 与固定的权限范围，但不会接收父会话的对话、角色设定、工具筛选器、深度策略或结构化输出约定。每次运行都拥有独立的 SDK query、取消控制器、CLI 进程和不持久化的产品会话。
+本提供方声明 `permissionMode` 与 `resume` 这两个启动时能力（如上强制执行），不声明其他任何可选能力，并报告 `inheritsParentContext: false`。Claude Code 会接收独立文本任务、父会话 cwd 与固定的权限范围，但不会接收父会话的对话、角色设定、工具筛选器、深度策略或结构化输出约定。每次运行都拥有独立的 SDK query、取消控制器与 CLI 进程；除非该次调用选择了续接，否则产品会话不会被持久化。
 
 ## 配置
 
@@ -98,13 +102,15 @@ Claude Code 子级会在一个全新的 SDK query 中接收独立文本任务。
 
 ## 已知限制与后续工作
 
-- **每次运行均新建一个 query 和一个进程**：不支持续接、恢复、池化、进度流或产品会话持久化。
+- **每次运行均新建一个 query 与一个进程；会话续接仅在选择启用时才有**：不支持池化或进度流；resume（见上文「Resume（可选）」）只保留 SDK 自身的会话状态，绝不保留本进程——被续接的调用仍会重新 spawn 一个全新的 `claude` 进程，再按 id 重新接入已持久化的会话。
+- **被续接的（持久化）会话会存储在宿主自身、以 cwd 为键的 `~/.claude/projects/` 存储中**：与 `persistSession: false`（SDK 从不把它持久化到进程退出之后）不同，`persistSession: true` 会把该会话写入用户自己交互式 `claude` 会话所使用的同一份磁盘存储中，以 cwd 为键，因此一次委派会话会出现在用户自己的 `claude --resume` 选择器里。选择启用 `allowResume` 的部署方应当把这视为该特性的一个持久的、宿主可见的副作用，而不是内部实现细节。从与创建会话时不同的 cwd 续接会失败（见上文「Resume（可选）」），正是因为该存储以 cwd 为键。
+- **重放父级 Session 日志无法重现被续接子级的内部状态**：父级自身的日志依然忠实地重建了每一次模型可见的工具调用与结果（模型可见 ⟺ 已记录这一不变式依然成立），但*子级*自身的 SDK 会话会跨每一次续接独立演化；第二次重放父级日志并不能重新推导出子级持久化会话此刻的内容，这与一个纯粹在 harness 内部（不可续接）的子级不同，后者的全部行为都是其已记录请求的确定性函数。
 - **`workspace-write` 只是拓宽白名单，并非操作系统级路径限制**：与 `codex` 姊妹提供方的 `sandbox: 'workspace-write'`（操作系统级 seatbelt／landlock 边界）不同，本提供方的 `workspace-write` 只是拓宽了固定的工具名白名单；如果真实 CLI 自身的工具实现允许，模型发起的 `Write`／`Edit`／`Bash` 调用仍可能指向子级自己工作目录之外的路径。该 seam 的 `permissionMode` JSDoc 描述的是限制路径的情形；在这里它只是一个更接近的近似，而非证明。
 - **产品安装与账户状态仍由原生机制管理**：`claude` 缺失或不兼容、配置错误或身份验证失败都会呈现为启动错误或运行错误；本插件不提供安装程序或登录流程。
 - **SDK 平台 CLI 仍在安装闭包内**：生产环境会忽略它，改用宿主提供的 `claude`，但当前 SDK 的可选依赖仍会安装，并提供无密钥兼容性 fixture。移除该载荷属于独立的产品安装闭包后续项。
 - **没有人工交互路径**：`AskUserQuestion` 被禁用，其他交互回调也不存在，因此需要新审批或输入的任务会失败而不会挂起。
 - **只返回最终文本、变更文件与用量**：推理、中间消息、工具通信和 stderr 仍只保留在产品内部；只有最终答案、`changedFiles` 与 `usage` 会进入共享结果（见上文"变更文件与用量"）。
-- **除 `permissionMode` 外没有可选的共享能力**：对于本提供方，共享服务会拒绝输出 schema、子任务角色设定、工具筛选和 harness 深度强制约束。
+- **除 `permissionMode` 与 `resume` 外没有可选的共享能力**：对于本提供方，共享服务会拒绝输出 schema、子任务角色设定、工具筛选和 harness 深度强制约束。
 - **没有按实际经过时间触发的超时或副作用回滚**：长时间运行的工作由调用方取消，且取消前已更改的文件或外部系统不会恢复原状。
 - **`protocol` 对本提供方不可达**：SDK 端到端地拥有自己的 wire 传输层，因此那里的形状偏差永远不会作为可分类的原因到达本提供方；一次在任何 result 消息之前发生的流或进程崩溃，只会呈现为一个未分类的 `error`。
 - **失败分类是针对外部开放词汇表的尽力而为**：`SDKAssistantMessageError` 可能在未来的 SDK 版本中扩充；未识别的值会分类为 `provider` 而不是直接失败关闭。

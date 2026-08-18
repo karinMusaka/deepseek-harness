@@ -185,12 +185,34 @@ async function realHarness(
   await ctx.plugin(claudeCode, { env, disposeGraceMs: 3_000 })
   const parent = {
     id: 'real-parent',
-    session: { header: { cwd: workspace } },
+    // `events` is a real mutable array (not a full `Session`): `resumeId`
+    // tests seed it directly with `seedResumeIssuance` — `SubagentRuntime`'s
+    // resume-authorization gate scans `parent.session.events` regardless of
+    // caller, including a test that calls `ctx.subagents.start()` directly.
+    session: { header: { cwd: workspace }, events: [] },
   } as unknown as Agent
   return {
     harness: { ctx, handles, spawnSpecs, parent, workspace, env, executable },
     fixture,
   }
+}
+
+/**
+ * Seed `parent.session.events` with the minimal `tool/result` shape
+ * `SubagentRuntime`'s resume-authorization gate scans for
+ * (`dsh-tool-subagent`'s real `presentationMeta` writes the identical shape
+ * through the full session-log append path; this reproduces just enough of
+ * it for a test that calls `ctx.subagents.start()` directly, bypassing that
+ * tool).
+ */
+function seedResumeIssuance(
+  parent: Agent,
+  issuance: { id: string; provider: string; permissionMode: string; cwd: string },
+): void {
+  (parent.session.events as unknown as unknown[]).push({
+    type: 'tool/result',
+    data: { meta: { subagentResume: issuance } },
+  })
 }
 
 async function expectQuiescent(
@@ -230,12 +252,15 @@ function startRequest(
   prompt: string,
   signal = new AbortController().signal,
   permissionMode?: 'read-only' | 'workspace-write',
+  resume?: { requestResume?: boolean; resumeId?: string; parent?: Agent },
 ) {
   return harness.ctx.subagents.start('claude-code', {
     prompt: [{ type: 'text', text: prompt }],
-    parent: harness.parent,
+    parent: resume?.parent ?? harness.parent,
     signal,
     ...permissionMode !== undefined ? { permissionMode } : {},
+    ...resume?.requestResume === true ? { requestResume: true } : {},
+    ...resume?.resumeId !== undefined ? { resumeId: resume.resumeId } : {},
   })
 }
 
@@ -352,6 +377,130 @@ describe('real Claude Agent SDK 0.3.220 and its distributed Claude Code 2.1.220 
     })
     await run.dispose()
     await expectQuiescent(harness.handles)
+  })
+})
+
+describe('real Claude Agent SDK 0.3.220 resume (PR5, opt-in)', { timeout: 60_000 }, () => {
+  it('resumes in the SAME cwd, keeping the SDK\'s own session_id, with settingSources/canUseTool still enforced', async () => {
+    const { harness } = await realHarness([
+      { kind: 'complete', text: 'first-turn-answer' },
+      { kind: 'complete', text: 'second-turn-answer' },
+    ])
+    const first = await startRequest(harness, 'remember the codeword BANANA77', undefined, 'read-only', { requestResume: true })
+    const firstResult = await first.result
+    expect(firstResult.stopReason).toBe('completed')
+    expect(typeof firstResult.resumeId).toBe('string')
+    await first.dispose()
+    seedResumeIssuance(harness.parent, {
+      id: firstResult.resumeId as string,
+      provider: 'claude-code',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+
+    const second = await startRequest(
+      harness,
+      'what was the codeword?',
+      undefined,
+      'read-only',
+      { resumeId: firstResult.resumeId as string },
+    )
+    const secondResult = await second.result
+    expect(secondResult).toEqual({
+      output: [{ type: 'text', text: 'second-turn-answer' }],
+      stopReason: 'completed',
+      authMode: 'api-key',
+      // Measured: `session_id` stays IDENTICAL across the resume (the SDK
+      // continues the same session; it does not fork it) — see the Agent
+      // Note.
+      resumeId: firstResult.resumeId,
+      usage: { inputTokens: 7, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    await second.dispose()
+    await expectQuiescent(harness.handles)
+  })
+
+  it('a resumed read-only child still cannot write — Write is denied on the resumed call exactly like a fresh one', async () => {
+    const { harness } = await realHarness([
+      { kind: 'complete', text: 'first-turn-answer' },
+      { kind: 'toolUse', name: 'Write', input: { file_path: 'made.txt', content: 'WROTE\n' } },
+      { kind: 'complete', text: 'attempted the write' },
+    ])
+    const marker = join(harness.workspace, 'made.txt')
+    const first = await startRequest(harness, 'start the task', undefined, 'read-only', { requestResume: true })
+    const firstResult = await first.result
+    await first.dispose()
+    seedResumeIssuance(harness.parent, {
+      id: firstResult.resumeId as string,
+      provider: 'claude-code',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+
+    const second = await startRequest(harness, 'Create made.txt.', undefined, 'read-only', { resumeId: firstResult.resumeId as string })
+    const secondResult = await second.result
+    expect(secondResult.stopReason).toBe('completed')
+    // No `changedFiles`: the denied Write's tool_use has no matching success
+    // evidence (see the failure-classification/changed-files Agent Note) —
+    // fixed `canUseTool` enforcement survives a resumed call unchanged.
+    expect(secondResult.changedFiles).toBeUndefined()
+    await second.dispose()
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('fails clearly (classified) when resuming from a DIFFERENT cwd than the one the session was created in', async () => {
+    const { harness } = await realHarness([{ kind: 'complete', text: 'first-turn-answer' }])
+    const first = await startRequest(harness, 'start the task', undefined, undefined, { requestResume: true })
+    const firstResult = await first.result
+    await first.dispose()
+
+    const otherWorkspace = mkdtempSync(join(tmpdir(), 'dsh-claude-code-real-other-'))
+    roots.push(otherWorkspace)
+    const otherParent = {
+      id: 'real-parent-other-cwd',
+      session: { header: { cwd: otherWorkspace }, events: [] },
+    } as unknown as Agent
+    seedResumeIssuance(otherParent, {
+      id: firstResult.resumeId as string,
+      provider: 'claude-code',
+      permissionMode: 'read-only',
+      cwd: otherWorkspace,
+    })
+    await expect(startRequest(
+      harness,
+      'continue',
+      undefined,
+      undefined,
+      { resumeId: firstResult.resumeId as string, parent: otherParent },
+    ).then(run => run.result)).resolves.toMatchObject({
+      stopReason: 'error',
+      // Measured: "No conversation found with session ID: …" — the store is
+      // cwd-keyed (see the Agent Note). Classifies through the EXISTING
+      // is_error/errors path (PR3); no new classification code was needed.
+      failure: { code: 'provider' },
+    })
+  })
+
+  it('fails clearly (classified) when resuming a fake/unissued session id', async () => {
+    const { harness } = await realHarness([{ kind: 'complete', text: 'unused' }])
+    seedResumeIssuance(harness.parent, {
+      id: '00000000-0000-0000-0000-000000000000',
+      provider: 'claude-code',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+    const run = await startRequest(
+      harness,
+      'continue',
+      undefined,
+      'read-only',
+      { resumeId: '00000000-0000-0000-0000-000000000000' },
+    )
+    await expect(run.result).resolves.toMatchObject({
+      stopReason: 'error',
+      failure: { code: 'provider' },
+    })
+    await run.dispose()
   })
 })
 

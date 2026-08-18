@@ -174,12 +174,14 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
 function success(
   result = 'answer',
   isError = false,
+  sessionId = 'sdk-session-fixture',
 ): SDKResultMessage {
   return {
     type: 'result',
     subtype: 'success',
     is_error: isError,
     result,
+    session_id: sessionId,
   } as SDKResultMessage
 }
 
@@ -257,6 +259,7 @@ function fakeRun(
   const spec: ClaudeCodeRunSpec = {
     cwd: '/workspace',
     permissionMode: 'read-only',
+    requestResume: false,
     executable: '/native/claude',
     env: { ANTHROPIC_API_KEY: 'fake-key' },
     disposeGraceMs: 5,
@@ -552,6 +555,7 @@ describe('query options and result mapping', () => {
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
       permissionMode: 'read-only',
+      requestResume: false,
       executable: '/native/claude',
       env: {
         HOST_VISIBLE: 'overridden',
@@ -603,6 +607,35 @@ describe('query options and result mapping', () => {
     }))
   })
 
+  it('opts into persistSession only when requestResume or resumeId is set (default stays false — PR5 regression)', () => {
+    const baseSpec = (overrides: Partial<ClaudeCodeRunSpec>): ClaudeCodeRunSpec => ({
+      cwd: '/workspace',
+      permissionMode: 'read-only',
+      requestResume: false,
+      executable: '/native/claude',
+      env: {},
+      disposeGraceMs: 5,
+      spawn: () => fakeChild().handle,
+      ...overrides,
+    })
+    // Default (requestResume: false, no resumeId): unchanged from before this
+    // capability existed.
+    expect(claudeQueryOptions(baseSpec({}), new AbortController(), () => {})).toMatchObject({
+      persistSession: false,
+    })
+    expect(claudeQueryOptions(baseSpec({}), new AbortController(), () => {})).not.toHaveProperty('resume')
+    // Opt-in: a fresh call requesting resumability.
+    expect(claudeQueryOptions(baseSpec({ requestResume: true }), new AbortController(), () => {})).toMatchObject({
+      persistSession: true,
+    })
+    // Opt-in: continuing a prior run — `Options.resume` carries the id,
+    // never `forkSession` (this mechanism continues the SAME `session_id`,
+    // not a forked branch of it — see the Agent Note).
+    const resuming = claudeQueryOptions(baseSpec({ resumeId: 'prior-session-1' }), new AbortController(), () => {})
+    expect(resuming).toMatchObject({ persistSession: true, resume: 'prior-session-1' })
+    expect(resuming).not.toHaveProperty('forkSession')
+  })
+
   it.each([
     ['read-only', 'Read', true],
     ['read-only', 'Glob', true],
@@ -626,6 +659,7 @@ describe('query options and result mapping', () => {
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
       permissionMode,
+      requestResume: false,
       executable: '/native/claude',
       env: {},
       disposeGraceMs: 5,
@@ -764,6 +798,27 @@ describe('query options and result mapping', () => {
       queryFrom([{ type: 'system', subtype: 'init' } as SDKMessage]),
       process.cwd(),
     )).rejects.toThrow('ended without a result')
+  })
+
+  it('reports resumeId only when persistent, using the SDK\'s own session_id (never a default/omitted call)', async () => {
+    const nonPersistent = await consumeClaudeQuery(
+      queryFrom([success('answer', false, 'sdk-session-a')]),
+      process.cwd(),
+      false,
+    )
+    expect(nonPersistent.resumeId).toBeUndefined()
+
+    const persistent = await consumeClaudeQuery(
+      queryFrom([success('answer', false, 'sdk-session-b')]),
+      process.cwd(),
+      true,
+    )
+    expect(persistent.resumeId).toBe('sdk-session-b')
+
+    // Default call site (persistent omitted): unaffected, same as before this
+    // capability existed.
+    const omitted = await consumeClaudeQuery(queryFrom([success('answer', false, 'sdk-session-c')]), process.cwd())
+    expect(omitted.resumeId).toBeUndefined()
   })
 
   it('skips a per-message max_output_tokens note instead of retaining it as a failure cause', async () => {
@@ -1130,6 +1185,7 @@ describe('run publication, cancellation, and settlement', () => {
     const spec: ClaudeCodeRunSpec = {
       cwd: '/workspace',
       permissionMode: 'read-only',
+      requestResume: false,
       executable: '/native/claude',
       env: {},
       disposeGraceMs: 5,
@@ -1185,6 +1241,7 @@ describe('run publication, cancellation, and settlement', () => {
         executable: '/native/claude',
         env: {},
         disposeGraceMs: 5,
+        requestResume: false,
         spawn: () => child.handle,
       },
     )

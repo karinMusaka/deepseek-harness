@@ -63,9 +63,12 @@ class CodexProvider implements SubagentProvider {
   readonly name = 'codex'
   // Every other start-time capability stays NO_START_CAPABILITIES's `false`: an
   // out-of-process app-server child cannot honor `outputSchema`/`maxDepth`/
-  // `toolFilter`/`persona`. `permissionMode` is the one exception — the
-  // official app-server's own `sandbox`/`approvalPolicy` enforce it natively.
-  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true }
+  // `toolFilter`/`persona`. `permissionMode` and `resume` are the two
+  // exceptions — the official app-server's own `sandbox`/`approvalPolicy`
+  // enforce the former natively, and its own `thread/start { ephemeral:
+  // false }`/`thread/resume` enforce the latter (opt-in only — see the
+  // [Agent Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)).
+  readonly capabilities: SubagentCapabilities = { ...NO_START_CAPABILITIES, permissionMode: true, resume: true }
   readonly inheritsParentContext = false
 
   constructor(
@@ -89,6 +92,8 @@ class CodexProvider implements SubagentProvider {
       // Absent means the provider's own default (`SubagentStartRequest.permissionMode` JSDoc):
       // fixed here as `read-only`, never left to the app-server's own config.toml.
       permissionMode: request.permissionMode ?? 'read-only',
+      requestResume: request.requestResume === true,
+      ...request.resumeId !== undefined ? { resumeId: request.resumeId } : {},
       env: this.config.env,
       authMode: resolveAuthMode(this.config.env),
       disposeGraceMs: this.config.disposeGraceMs,

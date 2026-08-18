@@ -30,6 +30,16 @@ interface SubagentCapabilities {
   readonly toolFilter: boolean
   readonly persona: boolean
   readonly permissionMode: boolean
+  /**
+   * Whether this provider can keep a child's provider-native thread/session
+   * alive past this run and resume it in a later call
+   * ({@link SubagentStartRequest.requestResume}/{@link SubagentStartRequest.resumeId}).
+   * An in-process provider shares the parent's own Cordis authority and has
+   * no separate native thread to persist, so `spawn`/`fork`/`acp`/`dsh-sdk`
+   * all declare `false`; `codex` and `claude-code` are the two providers with
+   * a native resumable thread/session concept.
+   */
+  readonly resume: boolean
 }
 ```
 
@@ -102,6 +112,43 @@ interface SubagentStartRequest {
    * provider's own default, which every provider defines as `read-only`.
    */
   readonly permissionMode?: SubagentPermissionMode
+  /**
+   * Opt-in request that THIS run's provider-native thread/session remain
+   * resumable after it ends, so a later call can continue it with
+   * {@link resumeId}. Requires {@link SubagentCapabilities.resume}; rejected at
+   * start otherwise. Ignored when {@link resumeId} is set (a resumed run is
+   * already resumable by construction — see each provider's own behavior).
+   * This is the model's own legitimate call to make: requesting continuation
+   * is not a scope widening, unlike {@link permissionMode}, which only a
+   * deployment may set ([Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)).
+   * The deployment still gates whether this field is ever reachable at all
+   * (`dsh-tool-subagent`'s `allowResume`, default `false`): the seam accepts
+   * the field unconditionally when the provider supports it, and the
+   * model-facing tool is what decides whether the parameter exists in the
+   * first place.
+   */
+  readonly requestResume?: boolean
+  /**
+   * A resume id from a PRIOR run's {@link SubagentResult.resumeId}, naming the
+   * provider-native thread/session to continue instead of starting fresh.
+   * Requires {@link SubagentCapabilities.resume}; rejected at start otherwise.
+   *
+   * ★ SECURITY: this value is UNTRUSTED model output. The child inherits the
+   * delegating process's `HOME`, so a provider's own thread/session store
+   * (`~/.codex`, `~/.claude/projects/`) holds the USER's own private
+   * conversations — resuming an unverified id would let a delegated model
+   * load one of those into its own context. `SubagentRuntime.start` verifies
+   * this id, BEFORE dispatching to the provider, against a same-harness
+   * -session, same-scope issuance record derived from the session's own
+   * event log (never an in-process-only cache — a harness session survives
+   * process restarts). A provider's `start()` implementation never needs to
+   * (and must not be relied on to) re-verify this field; by the time it is
+   * called, the id is authorized for this exact `(provider, permissionMode,
+   * cwd)` scope. See the [Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md).
+   */
+  readonly resumeId?: string
 }
 ```
 
@@ -385,17 +432,36 @@ interface SubagentResult {
    */
   readonly changedFiles?: readonly string[]
   /**
-   * Token usage for this run, normalized to {@link SubagentUsage}'s common
+   * Token usage for THIS call, normalized to {@link SubagentUsage}'s common
    * meaning, or absent when the provider observed none. Present only for a
    * `completed` or `max-tokens` result (same scope as {@link changedFiles});
    * an `aborted` or unclassified `error` result does not carry partial usage
-   * accounting (Known Limitations). Codex retains only the LAST observed
-   * `thread/tokenUsage/updated` notification's cumulative `total` — the
-   * app-server fires this notification several times per turn, each carrying
-   * the run's running total, not a per-notification delta; summing them
-   * double-counts (measured, see the Agent Note).
+   * accounting (Known Limitations). Codex's `thread/tokenUsage/updated`
+   * notification carries two distinct fields: `total` is the THREAD's
+   * lifetime-cumulative usage (never resets across a `thread/resume`, so a
+   * resumed call's own first notification already carries the prior call's
+   * total baked in — measured, see the Agent Note) and `last` is the
+   * individual model call's own usage, non-cumulative even within one turn.
+   * This field sums each notification's `last` across the current turn only,
+   * never reading `total` — the only construction that reports THIS call's
+   * own usage correctly on both a fresh thread and a resumed one.
    */
   readonly usage?: SubagentUsage
+  /**
+   * Resume id for THIS run's provider-native thread/session, present only
+   * when the run was opted into resumability ({@link
+   * SubagentStartRequest.requestResume} or a successful {@link
+   * SubagentStartRequest.resumeId} continuation) and the provider published
+   * one. Always the PROVIDER's own reported identity (Codex's `thread.id`,
+   * Claude's `session_id`) — never an echo of a model-supplied
+   * {@link SubagentStartRequest.resumeId} — so a later resume request is
+   * verified against what the provider actually created, not what the model
+   * merely asked for. Pass this value back as {@link
+   * SubagentStartRequest.resumeId} to continue this exact run. Absent for
+   * every in-process provider and for an out-of-process provider that was not
+   * asked to resume.
+   */
+  readonly resumeId?: string
 }
 ```
 
@@ -778,7 +844,7 @@ async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 
 Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:175`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:179`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagent-events"></a>
 
@@ -804,7 +870,7 @@ A published child settled. Scope-filtered dispatch uses the same delegating pare
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:170`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:174`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-added--emit"></a>
 
@@ -821,7 +887,7 @@ A provider became resolvable in the registry.
 'subagent/provider-added'(provider: SubagentProvider): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:144`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:148`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-removed--emit"></a>
 
@@ -838,7 +904,7 @@ A provider left the registry. Accepted runs remain holder-owned.
 'subagent/provider-removed'(name: string): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:150`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:154`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentstart--emit"></a>
 
@@ -862,5 +928,5 @@ A provider established a published child. For in-process providers, `ctx.agents.
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:161`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:165`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

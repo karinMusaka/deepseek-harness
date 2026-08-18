@@ -88,6 +88,10 @@ class ProtocolPeer {
   respond(requestFrame: JsonObject, result: unknown): void {
     this.send({ id: requestFrame.id, result })
   }
+
+  respondError(requestFrame: JsonObject, code: number, message: string): void {
+    this.send({ id: requestFrame.id, error: { code, message } })
+  }
 }
 
 interface FakeChildOptions {
@@ -184,6 +188,7 @@ function runSpec(
   return {
     cwd: process.cwd(),
     permissionMode: 'read-only',
+    requestResume: false,
     env: {},
     disposeGraceMs: DEFAULT_DISPOSE_GRACE_MS,
     spawn: () => child.handle,
@@ -277,18 +282,28 @@ function fileChangeItem(
   }
 }
 
-/** One `thread/tokenUsage/updated` notification, matching the real app-server's measured shape. */
+/**
+ * One `thread/tokenUsage/updated` notification, matching the real app-server's
+ * measured shape. `last` is this individual model call's own declared usage
+ * (what production code reads); `total` defaults to the same value for tests
+ * that do not care about the distinction, but a caller proving production
+ * code does NOT read `total` passes a deliberately different (inflated)
+ * value — measured real behavior: `total` is the THREAD's cumulative
+ * lifetime total, not reset per turn, so it is NOT usable as "this call's
+ * usage" on a resumed thread (see the Agent Note).
+ */
 function tokenUsageUpdated(
-  total: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number },
+  last: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number },
   turnId = 'turn-1',
   threadId = 'thread-1',
+  total: { inputTokens: number; outputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number } = last,
 ): JsonObject {
   return {
     method: 'thread/tokenUsage/updated',
     params: {
       threadId,
       turnId,
-      tokenUsage: { total, last: total, modelContextWindow: 258400 },
+      tokenUsage: { total, last, modelContextWindow: 258400 },
     },
   }
 }
@@ -816,7 +831,7 @@ describe('CodexAppServerWire', () => {
       const pending = wire.startThread('/workspace', 'read-only', new AbortController().signal)
       const frame = await child.peer.nextMethod('thread/start')
       child.peer.respond(frame, { thread: { id: 'thread-1', ephemeral: false } })
-      await expect(pending).rejects.toThrow('did not create an ephemeral thread')
+      await expect(pending).rejects.toThrow('created a thread with ephemeral=false, expected true')
       wire.close()
     }
     {
@@ -827,6 +842,99 @@ describe('CodexAppServerWire', () => {
       await expect(pending).rejects.toThrow('turn/start turn id')
       wire.close()
     }
+  })
+
+  it('creates a persistent (non-ephemeral) thread and reports its own id as resumeId', async () => {
+    const child = fakeChild()
+    const wire = new CodexAppServerWire(child.handle.stdout!, child.handle.stdin!)
+    wire.start()
+    const initializing = wire.initialize(new AbortController().signal)
+    child.peer.respond(await child.peer.nextMethod('initialize'), { userAgent: 'codex-cli 0.147.0' })
+    await initializing
+    const starting = wire.startThread('/workspace', 'read-only', new AbortController().signal, true)
+    const threadStart = await child.peer.nextMethod('thread/start')
+    expect(threadStart.params).toMatchObject({ ephemeral: false })
+    child.peer.respond(threadStart, { thread: { id: 'persistent-thread-1', ephemeral: false } })
+    await starting
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      agentMessage('answer', 'final_answer', 'turn-1', 'persistent-thread-1'),
+      turnCompleted('completed', 'turn-1', 'persistent-thread-1'),
+    )
+    await expect(result).resolves.toMatchObject({ resumeId: 'persistent-thread-1' })
+    wire.close()
+  })
+
+  it('resumes a thread with camelCase threadId and re-pins sandbox/approvalPolicy, never trusting the persisted policy', async () => {
+    const child = fakeChild()
+    const wire = new CodexAppServerWire(child.handle.stdout!, child.handle.stdin!)
+    wire.start()
+    const resuming = wire.resumeThread('resumed-thread-1', 'workspace-write', new AbortController().signal)
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    // Measured: the wire param is camelCase `threadId` (the Rust source
+    // field `thread_id` fails with `-32600 "missing field threadId"`).
+    expect(resumeRequest.params).toEqual({
+      threadId: 'resumed-thread-1',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'never',
+    })
+    child.peer.respond(resumeRequest, { thread: { id: 'resumed-thread-1', ephemeral: false } })
+    await resuming
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-2' } })
+    child.peer.send(
+      agentMessage('answer', 'final_answer', 'turn-2', 'resumed-thread-1'),
+      turnCompleted('completed', 'turn-2', 'resumed-thread-1'),
+    )
+    await expect(result).resolves.toMatchObject({ resumeId: 'resumed-thread-1' })
+    wire.close()
+  })
+
+  it('classifies a rejected thread/resume (invalid/unknown id) as a provider failure, never an unclassified crash', async () => {
+    const child = fakeChild()
+    const wire = new CodexAppServerWire(child.handle.stdout!, child.handle.stdin!)
+    wire.start()
+    const resuming = wire.resumeThread('unknown-thread-id', 'read-only', new AbortController().signal)
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    // Measured real app-server response for an id its own store does not recognize.
+    child.peer.respondError(resumeRequest, -32600, 'no rollout found for thread id unknown-thread-id')
+    await expect(resuming).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'provider' },
+    })
+    wire.close()
+  })
+
+  it('rethrows a non-JsonRpcResponseError classified failure from a malformed thread/resume response unchanged', async () => {
+    const child = fakeChild()
+    const wire = new CodexAppServerWire(child.handle.stdout!, child.handle.stdin!)
+    wire.start()
+    const resuming = wire.resumeThread('thread-a', 'read-only', new AbortController().signal)
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    // A well-formed JSON-RPC success whose `result` is not an object at all:
+    // `object()` classifies this as a protocol violation directly (never a
+    // `JsonRpcResponseError`), exercising `resumeThread`'s plain `throw error`
+    // rethrow arm rather than its `JsonRpcResponseError`-specific branch.
+    child.peer.respond(resumeRequest, null)
+    await expect(resuming).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'protocol' },
+    })
+    wire.close()
+  })
+
+  it('rejects a thread/resume that resumed a different thread than requested', async () => {
+    const child = fakeChild()
+    const wire = new CodexAppServerWire(child.handle.stdout!, child.handle.stdin!)
+    wire.start()
+    const resuming = wire.resumeThread('thread-a', 'read-only', new AbortController().signal)
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    child.peer.respond(resumeRequest, { thread: { id: 'thread-b', ephemeral: false } })
+    await expect(resuming).rejects.toThrow('resumed a different thread than requested')
+    wire.close()
   })
 
   it('fails closed for empty output, malformed messages, phases, and terminal status', async () => {
@@ -1227,7 +1335,7 @@ describe('CodexAppServerWire', () => {
     wire.close()
   })
 
-  it('rejects a malformed thread/tokenUsage/updated total field as a protocol failure', async () => {
+  it('rejects a malformed thread/tokenUsage/updated last field as a protocol failure', async () => {
     const { child, wire } = await initializeWire()
     const result = wire.runTurn(['task'], new AbortController().signal)
     const turnStart = await child.peer.nextMethod('turn/start')
@@ -1240,8 +1348,9 @@ describe('CodexAppServerWire', () => {
         tokenUsage: {
           // A non-number inputTokens is the measured shape deviation this
           // validator exists to reject — never a value this run should ever
-          // silently treat as zero or drop.
-          total: { inputTokens: 'not-a-number', outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+          // silently treat as zero or drop. Production code reads `last`, not
+          // `total` (see the Agent Note), so the malformed field belongs there.
+          last: { inputTokens: 'not-a-number', outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
         },
       },
     })
@@ -1272,23 +1381,93 @@ describe('CodexAppServerWire', () => {
     wire.close()
   })
 
-  it('retains only the LAST observed cumulative thread/tokenUsage/updated total, never summing (regression: double-counting)', async () => {
+  it('sums each notification\'s own last field for one turn, never the raw cumulative total (regression: double-counting)', async () => {
     const { child, wire } = await initializeWire()
     const result = wire.runTurn(['task'], new AbortController().signal)
     const turnStart = await child.peer.nextMethod('turn/start')
     child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
     child.peer.send(
-      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
-      tokenUsageUpdated({ inputTokens: 57868, outputTokens: 107, cachedInputTokens: 40448, cacheWriteInputTokens: 0 }),
+      // A real 2-response turn (tool call, then final answer): each
+      // notification's `last` is that individual model call's own usage
+      // (measured, see the Agent Note), while `total` is deliberately given
+      // an unrelated INFLATED value here (as if this thread already carried
+      // prior-turn history from a resume) to prove production code never
+      // reads it.
+      tokenUsageUpdated(
+        { inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+        'turn-1', 'thread-1',
+        { inputTokens: 100_010, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+      ),
+      tokenUsageUpdated(
+        { inputTokens: 20, outputTokens: 6, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+        'turn-1', 'thread-1',
+        { inputTokens: 100_030, outputTokens: 11, cachedInputTokens: 40_448, cacheWriteInputTokens: 0 },
+      ),
       agentMessage('answer', 'final_answer'),
       turnCompleted('completed'),
     )
     await expect(result).resolves.toEqual({
       output: [{ type: 'text', text: 'answer' }],
       stopReason: 'completed',
-      // The LAST notification's own total (57975 = 57868 + 107), not the sum
-      // of both notifications' totals (a double-count would report 68080).
-      usage: { inputTokens: 57868, outputTokens: 107, cacheReadTokens: 40448, cacheWriteTokens: 0 },
+      // Sum of both notifications' own `last` (10+20 in, 5+6 out) — the
+      // real usage for THIS turn. Reading either raw `total` (100_030/11, a
+      // double count against `last`'s own sum for a fresh thread, or an
+      // outright wrong inflated value for a resumed one) would fail this.
+      usage: { inputTokens: 30, outputTokens: 11, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    wire.close()
+  })
+
+  it('drops a thread/tokenUsage/updated notification for an earlier turn without throwing (the resume replay artifact)', async () => {
+    const { child, wire } = await initializeWire()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    child.peer.send(
+      // Measured: immediately after `thread/resume`, the app-server replays
+      // ONE `thread/tokenUsage/updated` notification for the PRE-resume
+      // thread's last completed turn, before this process ever calls
+      // `turn/start` — i.e. before `this.turnId` is committed. A naive
+      // `observePendingTurnId` call here would retain this stale id and then
+      // throw once `turn/start`'s own response names the real (different)
+      // turn. It must instead be dropped once the real turn commits (see the
+      // Agent Note).
+      tokenUsageUpdated({ inputTokens: 999, outputTokens: 999, cachedInputTokens: 0, cacheWriteInputTokens: 0 }, 'stale-pre-resume-turn'),
+    )
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
+      agentMessage('answer', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    wire.close()
+  })
+
+  it('silently drops a thread/tokenUsage/updated notification that arrives before any turn was ever started (no turn to queue it for)', async () => {
+    const { child, wire } = await initializeWire()
+    // No `runTurn()` call yet: `this.turnCompleted` is genuinely `undefined`
+    // here (distinct from the resume-replay test above, where `runTurn()`
+    // already ran and only `this.turnId` was still unset) — this notification
+    // has no turn to queue against at all, so it must be dropped outright,
+    // never queued into `earlyTurnNotifications`.
+    child.peer.send(tokenUsageUpdated({ inputTokens: 999, outputTokens: 999, cachedInputTokens: 0, cacheWriteInputTokens: 0 }))
+    await nextTask()
+    const result = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(
+      tokenUsageUpdated({ inputTokens: 10, outputTokens: 5, cachedInputTokens: 0, cacheWriteInputTokens: 0 }),
+      agentMessage('answer', 'final_answer'),
+      turnCompleted('completed'),
+    )
+    await expect(result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })
     wire.close()
   })
@@ -1374,6 +1553,56 @@ describe('run lifecycle and quiescence', () => {
     expect(child.waitForExit).toHaveBeenCalledTimes(1)
   })
 
+  it('sends thread/resume (not thread/start) when a resumeId is present, re-pinning sandbox/approvalPolicy', async () => {
+    const child = fakeChild()
+    const starting = startCodexRun(
+      request([{ type: 'text', text: 'continue the task' }]),
+      runSpec(child, { permissionMode: 'workspace-write', resumeId: 'prior-thread-1' }),
+    )
+    const initialize = await child.peer.nextMethod('initialize')
+    child.peer.respond(initialize, { userAgent: 'codex-cli 0.147.0' })
+    await child.peer.nextMethod('initialized')
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    expect(resumeRequest.params).toEqual({
+      threadId: 'prior-thread-1',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'never',
+    })
+    child.peer.respond(resumeRequest, { thread: { id: 'prior-thread-1', ephemeral: false } })
+    const run = await starting
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.send(
+      { id: turnStart.id, result: { turn: { id: 'turn-2' } } },
+      agentMessage('answer', 'final_answer', 'turn-2', 'prior-thread-1'),
+      turnCompleted('completed', 'turn-2', 'prior-thread-1'),
+    )
+    await expect(run.result).resolves.toEqual({
+      output: [{ type: 'text', text: 'answer' }],
+      stopReason: 'completed',
+      resumeId: 'prior-thread-1',
+    })
+    await run.dispose()
+  })
+
+  it('fails the run (never publishing) when thread/resume is rejected for an invalid/unknown id', async () => {
+    const child = fakeChild()
+    const starting = startCodexRun(
+      request([{ type: 'text', text: 'continue the task' }]),
+      runSpec(child, { resumeId: 'unknown-thread' }),
+    )
+    const initialize = await child.peer.nextMethod('initialize')
+    child.peer.respond(initialize, { userAgent: 'codex-cli 0.147.0' })
+    await child.peer.nextMethod('initialized')
+    const resumeRequest = await child.peer.nextMethod('thread/resume')
+    child.peer.respondError(resumeRequest, -32600, 'no rollout found for thread id unknown-thread')
+    await expect(starting).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'provider' },
+    })
+    await nextTask()
+    expect(child.terminate).toHaveBeenCalledTimes(1)
+  })
+
   it('settles local cancellation immediately and sends best-effort interrupt', async () => {
     const controller = new AbortController()
     const { child, run, turnStart } = await publishRun(
@@ -1428,6 +1657,7 @@ describe('run lifecycle and quiescence', () => {
         permissionMode: 'read-only',
         env: {},
         disposeGraceMs: 10,
+        requestResume: false,
         spawn,
       },
     )).rejects.toThrow('aborted before app-server startup')

@@ -87,8 +87,8 @@ type ResolvedConfig = Required<Omit<Config, 'cwd' | 'maxTokens'>> & Pick<Config,
 
 /**
  * The SDK provider. Advertises NO start-time capabilities: an out-of-process
- * child cannot honor `outputSchema`/`maxDepth`/`toolFilter`/`persona` (the
- * service rejects a request needing any of them before `start` runs).
+ * child cannot honor `outputSchema`/`maxDepth`/`toolFilter`/`persona`/`resume`
+ * (the service rejects a request needing any of them before `start` runs).
  */
 class SdkSubagentProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities = NO_START_CAPABILITIES

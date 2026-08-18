@@ -58,7 +58,9 @@ function completedTurnPrefix(parent: Agent): SessionEvent[] {
  * in-process structured runtime), plus `toolFilter`/`persona` (scoped
  * restrict() and a scoped shadowing persona section). No `permissionMode`: an
  * in-process fork shares the parent's own Cordis authority, with no separate
- * permission scope to fix at delegation.
+ * permission scope to fix at delegation. No `resume`: it has no separate
+ * native thread/session to persist past this run — its process-local child
+ * Agent already lives exactly as long as its owning Cordis fiber.
  */
 class ForkInProcessProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities = {
@@ -67,6 +69,7 @@ class ForkInProcessProvider implements SubagentProvider {
     toolFilter: true,
     persona: true,
     permissionMode: false,
+    resume: false,
   }
   // Context contract: a forked child IS seeded with the parent's completed-turn prefix.
   readonly inheritsParentContext = true

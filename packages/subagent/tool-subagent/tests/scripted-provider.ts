@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { ClassifiedSubagentFailure } from '@deepseek-ai/dsh-subagent'
 import type {
   SubagentCapabilities,
   SubagentFailureDetail,
@@ -20,6 +21,7 @@ const DEFAULT_CAPABILITIES: SubagentCapabilities = {
   toolFilter: true,
   persona: true,
   permissionMode: false,
+  resume: false,
 }
 
 /** Options for one scripted provider fixture. */
@@ -46,6 +48,22 @@ export interface Config {
   usage?: SubagentUsage
   /** Observes each start; the child's result additionally waits for the returned promise. */
   onStart?: (request: SubagentStartRequest) => Promise<void> | void
+  /**
+   * `resumeId` attached to the result when `request.requestResume` or
+   * `request.resumeId` is set (requires `capabilities: { resume: true }`).
+   * Receives the request so a scripted continuation can echo
+   * `request.resumeId` back (simulating a provider-native thread that keeps
+   * the SAME id across a resume) or mint a fresh one on first opt-in.
+   */
+  resumeId?: (request: SubagentStartRequest) => string
+  /**
+   * When set, `start()` rejects PRE-publication with a
+   * {@link ClassifiedSubagentFailure} carrying this detail, instead of ever
+   * returning a `SubagentRun` — simulates a native provider rejecting a
+   * resume attempt (or any other startup call) before any thread/session is
+   * ever published.
+   */
+  startThrows?: SubagentFailureDetail
 }
 
 /** Scripted provider whose result aborts if its signal or disposer wins first. */
@@ -63,6 +81,9 @@ class ScriptedSubagentProvider implements SubagentProvider {
 
   async start(request: SubagentStartRequest): Promise<SubagentRun> {
     if (request.signal.aborted) throw new Error('scripted subagent start aborted before publication')
+    if (this.config.startThrows !== undefined) {
+      throw new ClassifiedSubagentFailure(this.config.startThrows.message, this.config.startThrows)
+    }
     const reply = this.config.reply ?? 'scripted subagent reply'
     const output: ContentBlock[] = [{ type: 'text', text: reply }]
     const wantsStructured = request.outputSchema !== undefined && this.capabilities.outputSchema
@@ -76,6 +97,8 @@ class ScriptedSubagentProvider implements SubagentProvider {
       throw new Error('scripted subagent start aborted before publication')
     }
 
+    const wantsResume = request.requestResume === true || request.resumeId !== undefined
+    const resumeId = wantsResume && this.config.resumeId !== undefined ? this.config.resumeId(request) : undefined
     const resultFor = (): SubagentResult => ({
       output,
       ...wantsStructured ? { structured: this.config.structured ?? { reply } } : {},
@@ -84,6 +107,7 @@ class ScriptedSubagentProvider implements SubagentProvider {
       ...this.config.authMode !== undefined ? { authMode: this.config.authMode } : {},
       ...!state.cancelled && this.config.changedFiles !== undefined ? { changedFiles: [...this.config.changedFiles] } : {},
       ...!state.cancelled && this.config.usage !== undefined ? { usage: this.config.usage } : {},
+      ...!state.cancelled && resumeId !== undefined ? { resumeId } : {},
     })
     const gate = Promise.resolve(this.config.onStart?.(request))
     const result = gate.then(() => new Promise<SubagentResult>((resolve) => {

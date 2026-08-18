@@ -19,11 +19,12 @@ import type { SubagentCapabilities, SubagentFailureDetail, SubagentResult, Subag
 /**
  * The capability advertisement of an out-of-process backend: NONE. A child in
  * another process cannot honor parent-enforced start features
- * (`outputSchema`/`maxDepth`/`toolFilter`/`persona`/`permissionMode`), so the
- * service rejects a request needing any of them before `start` runs — never
- * accepted-then-ignored. A backend that DOES enforce `permissionMode` (its own
- * product sandbox or permission callback) spreads this constant and overrides
- * that one flag rather than declaring capabilities from scratch.
+ * (`outputSchema`/`maxDepth`/`toolFilter`/`persona`/`permissionMode`/`resume`),
+ * so the service rejects a request needing any of them before `start` runs —
+ * never accepted-then-ignored. A backend that DOES enforce `permissionMode`
+ * (its own product sandbox or permission callback) or `resume` (its own
+ * native resumable thread/session) spreads this constant and overrides that
+ * one flag rather than declaring capabilities from scratch.
  */
 export const NO_START_CAPABILITIES: SubagentCapabilities = Object.freeze({
   outputSchema: false,
@@ -31,6 +32,7 @@ export const NO_START_CAPABILITIES: SubagentCapabilities = Object.freeze({
   toolFilter: false,
   persona: false,
   permissionMode: false,
+  resume: false,
 })
 
 /**

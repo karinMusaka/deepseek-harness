@@ -10,6 +10,7 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
   SubagentError,
   assertSubagentMaxDepth,
+  SUBAGENT_RESUME_META_KEY,
   type ResolvedSubagentStartRequest,
   type SubagentCapabilities,
   type SubagentProvider,
@@ -18,10 +19,49 @@ import SubagentRuntime, {
   type SubagentRunEndInfo,
   type SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { CallId, createMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { Session, SESSION_FORMAT_VERSION, SessionId, type JsonValue, type SessionEvent } from '@deepseek-ai/dsh-session'
 
 function fakeParent(id = 'parent-1'): Agent {
   return { id: SessionId(id) } as unknown as Agent
+}
+
+/** A parent whose `session` is a real, directly-seedable `Session` (for resume-authorization tests). */
+function fakeParentWithSession(id: string, cwd: string | undefined): { agent: Agent; session: Session } {
+  const sessionId = SessionId(`${id}-session`)
+  const session = Session.create(sessionId, undefined, {
+    version: SESSION_FORMAT_VERSION,
+    id: sessionId,
+    createdAt: 0,
+    ...cwd !== undefined ? { cwd } : {},
+  })
+  return { agent: { id: SessionId(id), session } as unknown as Agent, session }
+}
+
+/** One complete, valid turn logging a `tool/result` event carrying `meta` — mirrors a real resumable call's log shape. */
+function seedResumeIssuance(session: Session, meta: Record<string, JsonValue>): void {
+  const turn = session.events.filter(event => event.type === 'turn/start').length + 1
+  const callId = CallId(`seed-${turn}`)
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step: 1 })
+  session.append('assistant/message', {
+    turn,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: callId, name: 'subagent', arguments: '{}' }],
+      source: { kind: 'model', provider: 'test', model: 'test' },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('tool/call', { turn, step: 1, callId, name: 'subagent', arguments: '{}' })
+  session.append('tool/result', {
+    turn,
+    step: 1,
+    message: createToolResultMessage({ callId, content: [{ type: 'text', text: 'seeded' }], isError: false }),
+    meta,
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn, step: 1 })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
 const ALL_CAPS: SubagentCapabilities = {
@@ -30,6 +70,7 @@ const ALL_CAPS: SubagentCapabilities = {
   toolFilter: true,
   persona: true,
   permissionMode: true,
+  resume: true,
 }
 const NO_CAPS: SubagentCapabilities = {
   outputSchema: false,
@@ -37,6 +78,7 @@ const NO_CAPS: SubagentCapabilities = {
   toolFilter: false,
   persona: false,
   permissionMode: false,
+  resume: false,
 }
 
 function baseRequest(overrides: Partial<SubagentStartRequest> = {}): SubagentStartRequest {
@@ -330,6 +372,48 @@ describe('SubagentRuntime', () => {
     expect(error).toBeInstanceOf(HarnessError)
     expect(error.name).toBe('SubagentError')
     expect(error.code).toBe('NO_PROVIDER')
+  })
+
+  it('rejects a resumeId against a provider that does not advertise the resume capability', async () => {
+    const { subagents } = await service()
+    subagents.registerProvider(new StubProvider('no-resume', NO_CAPS))
+    await expect(subagents.start('no-resume', baseRequest({ resumeId: 'r-1' })))
+      .rejects.toThrow('does not support the "resume" capability')
+  })
+
+  it('starts a resumed run once the parent session logged a matching issuance', async () => {
+    const { subagents } = await service()
+    const provider = new StubProvider('resumable', ALL_CAPS)
+    subagents.registerProvider(provider)
+    const { agent, session } = fakeParentWithSession('delegator', '/workspace')
+    seedResumeIssuance(session, {
+      [SUBAGENT_RESUME_META_KEY]: { id: 'r-1', provider: 'resumable', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    await subagents.start('resumable', baseRequest({ parent: agent, resumeId: 'r-1' }))
+    expect(provider.startCount).toBe(1)
+  })
+
+  it('fails closed (never reaching the provider) when the parent session header carries no cwd', async () => {
+    const { subagents } = await service()
+    const provider = new StubProvider('resumable-no-cwd', ALL_CAPS)
+    subagents.registerProvider(provider)
+    const { agent, session } = fakeParentWithSession('delegator-no-cwd', undefined)
+    seedResumeIssuance(session, {
+      [SUBAGENT_RESUME_META_KEY]: { id: 'r-1', provider: 'resumable-no-cwd', permissionMode: 'read-only', cwd: '/workspace' },
+    })
+    await expect(subagents.start('resumable-no-cwd', baseRequest({ parent: agent, resumeId: 'r-1' })))
+      .rejects.toThrow('not issued in this scope by this harness session')
+    expect(provider.startCount).toBe(0)
+  })
+
+  it('fails closed for a resumeId this session never logged', async () => {
+    const { subagents } = await service()
+    const provider = new StubProvider('resumable-unissued', ALL_CAPS)
+    subagents.registerProvider(provider)
+    const { agent } = fakeParentWithSession('delegator-unissued', '/workspace')
+    await expect(subagents.start('resumable-unissued', baseRequest({ parent: agent, resumeId: 'never-issued' })))
+      .rejects.toThrow('not issued in this scope by this harness session')
+    expect(provider.startCount).toBe(0)
   })
 })
 

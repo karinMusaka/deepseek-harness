@@ -59,6 +59,25 @@ export interface ClaudeCodeRunSpec {
    * the provider). Enforced by {@link fixedCanUseTool}'s allowlist.
    */
   readonly permissionMode: SubagentPermissionMode
+  /**
+   * Opt-in request that this run's session remain resumable
+   * (`SubagentStartRequest.requestResume`). Ignored when {@link resumeId} is
+   * set. Default `false`: the shipped default stays `persistSession: false`,
+   * exactly as before this capability existed.
+   */
+  readonly requestResume: boolean
+  /**
+   * A resume id from a prior run's {@link SubagentResult.resumeId}
+   * (`SubagentStartRequest.resumeId`), ALREADY authorized by
+   * `SubagentRuntime.start`'s session-log check before this provider ever
+   * sees it. Passed to the official SDK's `Options.resume`. The child's cwd
+   * is derived from the parent session's own workspace, so it normally
+   * matches automatically; a genuine mismatch fails clearly with the SDK's
+   * own "No conversation found with session ID: …" (measured — the store is
+   * cwd-keyed, see the [Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)).
+   */
+  readonly resumeId?: string
   /** Exact native Claude Code executable resolved from the host PATH. */
   readonly executable: string
   /** Explicit deployment/test environment layered after shared scrubbing. */
@@ -360,11 +379,17 @@ export function deniedToolUseIds(message: unknown): ReadonlySet<string> {
  *   `tool_use` path (measured: Claude's own `file_path`/`notebook_path`
  *   argument can be relative to it despite the SDK's type documentation
  *   saying absolute; see the Agent Note).
+ * @param persistent - whether this call opted into resumability (a fresh
+ *   `requestResume` or a continuation via `resumeId`) — when true, the
+ *   terminal result's own `session_id` is reported back as
+ *   {@link SubagentResult.resumeId} (the SDK's own reported identity, never
+ *   an echo of a model-supplied {@link SubagentStartRequest.resumeId}).
  * @returns the completed shared result.
  */
 export async function consumeClaudeQuery(
   query: AsyncIterable<SDKMessage>,
   cwd: string,
+  persistent = false,
 ): Promise<SubagentResult> {
   let answer: string | undefined
   let retainedAssistantClass: SubagentFailureCode | undefined
@@ -372,6 +397,7 @@ export async function consumeClaudeQuery(
   const succeededIds = new Set<string>()
   let resolvedUsage: SubagentUsage | undefined
   let resolvedChangedFiles: readonly string[] | undefined
+  let resolvedResumeId: string | undefined
   for await (const message of query) {
     if (message.type === 'assistant') {
       if (message.error !== undefined) {
@@ -394,6 +420,7 @@ export async function consumeClaudeQuery(
       if (fields.resultText !== undefined && fields.resultText.trim().length > 0) {
         answer = fields.resultText
         resolvedUsage = claudeUsage(message)
+        if (persistent) resolvedResumeId = message.session_id
         const denied = deniedToolUseIds(message)
         const changed: string[] = []
         const seen = new Set<string>()
@@ -421,6 +448,7 @@ export async function consumeClaudeQuery(
     stopReason: 'completed',
     ...resolvedChangedFiles !== undefined ? { changedFiles: resolvedChangedFiles } : {},
     ...resolvedUsage !== undefined ? { usage: resolvedUsage } : {},
+    ...resolvedResumeId !== undefined ? { resumeId: resolvedResumeId } : {},
   }
 }
 
@@ -532,15 +560,22 @@ export function claudeQueryOptions(
   controller: AbortController,
   capture: (child: SubprocessHandle) => void,
 ): Options {
+  const persistent = spec.requestResume || spec.resumeId !== undefined
   return {
     abortController: controller,
     cwd: spec.cwd,
     pathToClaudeCodeExecutable: spec.executable,
     env: { ...scrubbedParentEnv(), ...spec.env },
-    persistSession: false,
+    // Opt-in only (PR5): the shipped default stays `persistSession: false`,
+    // exactly as before this capability existed. `forkSession` is
+    // deliberately unused — this mechanism continues the SAME `session_id`
+    // across calls (measured), not a forked branch of it.
+    persistSession: persistent,
+    ...spec.resumeId !== undefined ? { resume: spec.resumeId } : {},
     // The child's world is fixed at delegation: host CLAUDE.md, MCP servers,
     // and permission pre-approvals from `~/.claude/settings.json` and project
     // settings must never leak in and drift what an identical delegation does.
+    // Measured to remain enforced on a resumed call, exactly like a fresh one.
     settingSources: [],
     permissionMode: 'default',
     disallowedTools: ['AskUserQuestion'],
@@ -627,7 +662,7 @@ export async function startClaudeCodeRun(
   const publishedQuery = query
   const publishedChild = child
   const result = settleRunResult({
-    attempt: () => consumeClaudeQuery(publishedQuery, spec.cwd),
+    attempt: () => consumeClaudeQuery(publishedQuery, spec.cwd, spec.requestResume || spec.resumeId !== undefined),
     collectOutput: () => [],
     cancelled: () => controller.signal.aborted,
     onError: spec.onError,

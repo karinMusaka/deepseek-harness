@@ -285,7 +285,9 @@ describe('dsh-subagent-spawn-in-process', () => {
   it('advertises every start-time capability (depthLimit, outputSchema, toolFilter, persona)', async () => {
     const { ctx } = await setup([])
     const provider = ctx.subagents.getProvider('spawn')!
-    expect(provider.capabilities).toEqual({ outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false })
+    expect(provider.capabilities).toEqual({
+      outputSchema: true, depthLimit: true, toolFilter: true, persona: true, permissionMode: false, resume: false,
+    })
   })
 
   it('unregisters the provider when its fiber is disposed (HMR safety)', async () => {

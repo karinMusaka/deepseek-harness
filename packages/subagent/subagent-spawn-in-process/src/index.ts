@@ -33,12 +33,13 @@ export const Config: z<Config> = z.object({
 
 /**
  * The spawn provider. Supports every start-time capability except
- * `permissionMode`: `depthLimit` (it constructs the child, so it can enforce a
- * recursion cap), `outputSchema` (the scoped structured runtime), and
- * `toolFilter`/`persona` (scoped `restrict()` and a scoped shadowing persona
- * section, applied in the child's creation window). It has no separate
- * permission-scope mechanism to fix at delegation — an in-process child shares
- * the parent's own Cordis authority.
+ * `permissionMode` and `resume`: `depthLimit` (it constructs the child, so it
+ * can enforce a recursion cap), `outputSchema` (the scoped structured
+ * runtime), and `toolFilter`/`persona` (scoped `restrict()` and a scoped
+ * shadowing persona section, applied in the child's creation window). It has
+ * no separate permission-scope mechanism to fix at delegation — an in-process
+ * child shares the parent's own Cordis authority — and no separate native
+ * thread/session to persist past this run.
  */
 class SpawnInProcessProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities = {
@@ -47,6 +48,7 @@ class SpawnInProcessProvider implements SubagentProvider {
     toolFilter: true,
     persona: true,
     permissionMode: false,
+    resume: false,
   }
   // Context contract: a spawned child starts fresh — it never sees the parent conversation.
   readonly inheritsParentContext = false

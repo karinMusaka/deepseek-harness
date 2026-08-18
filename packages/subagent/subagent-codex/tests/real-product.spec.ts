@@ -54,6 +54,24 @@ interface RealHarness {
   readonly workspace: string
 }
 
+/**
+ * Seed `parent.session.events` with the minimal `tool/result` shape
+ * `SubagentRuntime`'s resume-authorization gate scans for
+ * (`dsh-tool-subagent`'s real `presentationMeta` writes the identical shape
+ * through the full session-log append path; this reproduces just enough of
+ * it for a test that calls `ctx.subagents.start()` directly, bypassing that
+ * tool).
+ */
+function seedResumeIssuance(
+  parent: Agent,
+  issuance: { id: string; provider: string; permissionMode: string; cwd: string },
+): void {
+  (parent.session.events as unknown as unknown[]).push({
+    type: 'tool/result',
+    data: { meta: { subagentResume: issuance } },
+  })
+}
+
 async function realHarness(
   script: readonly ResponsesBehavior[],
   options: { readonly model?: string } = {},
@@ -117,7 +135,11 @@ async function realHarness(
   await ctx.plugin(codex, { env, disposeGraceMs: 2_000 })
   const parent = {
     id: 'real-parent',
-    session: { header: { cwd: workspace } },
+    // `events` is a real mutable array (not a full `Session`): `resumeId`
+    // tests seed it directly with `seedResumeIssuance` — `SubagentRuntime`'s
+    // resume-authorization gate scans `parent.session.events` regardless of
+    // caller, including a test that calls `ctx.subagents.start()` directly.
+    session: { header: { cwd: workspace }, events: [] },
   } as unknown as Agent
   return { harness: { ctx, handles, parent, env, workspace }, fixture }
 }
@@ -296,6 +318,123 @@ describe('real @openai/codex 0.147.0 product', () => {
     await fixture.requestStarted
     await expect(run.result).resolves.toMatchObject({ stopReason: 'aborted' })
     await run.dispose()
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+})
+
+describe('real @openai/codex 0.147.0 resume (PR5, opt-in)', () => {
+  it('creates a persistent thread, resumes it in a fresh process, preserves conversation history, and reports only the resumed call\'s own usage', async () => {
+    const { harness, fixture } = await realHarness([
+      { kind: 'complete', text: 'first-turn-answer' },
+      { kind: 'complete', text: 'second-turn-answer' },
+    ])
+    const first = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'remember the codeword BANANA77' }],
+      parent: harness.parent,
+      signal: new AbortController().signal,
+      requestResume: true,
+    })
+    const firstResult = await first.result
+    expect(firstResult.stopReason).toBe('completed')
+    expect(typeof firstResult.resumeId).toBe('string')
+    await first.dispose()
+    seedResumeIssuance(harness.parent, {
+      id: firstResult.resumeId as string,
+      provider: 'codex',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+
+    // A SEPARATE `ctx.subagents.start()` call — a distinct app-server process,
+    // exactly like a genuinely later call in a real deployment (Codex has no
+    // in-process "same connection" shortcut to accidentally rely on here).
+    const second = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'what was the codeword?' }],
+      parent: harness.parent,
+      signal: new AbortController().signal,
+      resumeId: firstResult.resumeId as string,
+    })
+    const secondResult = await second.result
+    expect(secondResult).toEqual({
+      output: [{ type: 'text', text: 'second-turn-answer' }],
+      stopReason: 'completed',
+      authMode: 'api-key',
+      resumeId: firstResult.resumeId,
+      // The resumed call's OWN usage only (10 in, 1 out — the fixture's fixed
+      // per-response usage) — NOT the thread's cumulative lifetime total,
+      // which `thread/tokenUsage/updated` would otherwise report as 20/2
+      // after resume (measured; see the Agent Note). A regression back to
+      // reading the raw cumulative `total` would fail this exact assertion.
+      usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    await second.dispose()
+
+    // Real measured proof of preserved context: codex-core's own resumed
+    // thread replayed the FIRST turn's conversation into the model request
+    // for the SECOND turn.
+    expect(fixture.requests).toHaveLength(2)
+    const secondRequestTexts = responseInputTexts(fixture.requests[1]!.body)
+    expect(secondRequestTexts.some(text => text.includes('BANANA77'))).toBe(true)
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('classifies a rejected resume (invalid/unknown thread id) as a provider failure and never publishes a run', async () => {
+    const { harness } = await realHarness([{ kind: 'complete', text: 'unused' }])
+    seedResumeIssuance(harness.parent, {
+      id: '00000000-0000-0000-0000-000000000000',
+      provider: 'codex',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+    await expect(harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'continue' }],
+      parent: harness.parent,
+      signal: new AbortController().signal,
+      resumeId: '00000000-0000-0000-0000-000000000000',
+    })).rejects.toMatchObject({
+      name: 'ClassifiedSubagentFailure',
+      failure: { code: 'provider' },
+    })
+    await expectQuiescent(harness.handles)
+  }, 60_000)
+
+  it('a resumed read-only thread still cannot write — the OS sandbox is re-pinned on every resume, never trusting the persisted thread\'s policy', async () => {
+    const { harness, fixture } = await realHarness([
+      { kind: 'complete', text: 'first-turn-answer' },
+      { kind: 'advertisedFunctionCall', choices: shellCallChoices('printf WROTE > marker.txt') },
+      { kind: 'complete', text: 'attempted the write' },
+    ])
+    const marker = join(harness.workspace, 'marker.txt')
+    const first = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'start the task' }],
+      parent: harness.parent,
+      permissionMode: 'read-only',
+      signal: new AbortController().signal,
+      requestResume: true,
+    })
+    const firstResult = await first.result
+    await first.dispose()
+    seedResumeIssuance(harness.parent, {
+      id: firstResult.resumeId as string,
+      provider: 'codex',
+      permissionMode: 'read-only',
+      cwd: harness.workspace,
+    })
+
+    const second = await harness.ctx.subagents.start('codex', {
+      prompt: [{ type: 'text', text: 'Create marker.txt.' }],
+      parent: harness.parent,
+      // Same fixed scope on resume — PR1's philosophy (approvals/sandbox stay
+      // pinned to what THIS call fixes, never the persisted thread's own).
+      permissionMode: 'read-only',
+      signal: new AbortController().signal,
+      resumeId: firstResult.resumeId as string,
+    })
+    await expect(second.result).resolves.toMatchObject({ stopReason: 'completed' })
+    await second.dispose()
+
+    expect(existsSync(marker)).toBe(false)
+    expect(JSON.stringify(fixture.requests.at(-1)!.body)).toContain('operation not permitted')
     await expectQuiescent(harness.handles)
   }, 60_000)
 })

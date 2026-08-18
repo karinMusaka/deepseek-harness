@@ -67,8 +67,12 @@ import { listChildren as listSubagentChildren, listDescendants as listSubagentDe
 import type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
+import { verifyResumeIssuance } from './resume-issuance.ts'
+import type { SubagentResumeIssuance } from './resume-issuance.ts'
 
 export * from './out-of-process.ts'
+export { SUBAGENT_RESUME_META_KEY, verifyResumeIssuance } from './resume-issuance.ts'
+export type { SubagentResumeIssuance } from './resume-issuance.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
 export type {
@@ -420,6 +424,7 @@ export class SubagentRuntime extends Service {
     this.assertCapabilities(provider, request)
     assertSubagentMaxDepth(request.maxDepth)
     if (request.outputSchema !== undefined) assertObjectJsonSchema(request.outputSchema)
+    if (request.resumeId !== undefined) this.assertResumeAuthorized(name, request)
     const descriptor = snapshotSubagentDescriptor({
       mode: 'one-shot',
       provider: name,
@@ -489,6 +494,7 @@ export class SubagentRuntime extends Service {
       { when: request.toolFilter !== undefined, cap: 'toolFilter' },
       { when: request.persona !== undefined, cap: 'persona' },
       { when: request.permissionMode !== undefined, cap: 'permissionMode' },
+      { when: request.requestResume === true || request.resumeId !== undefined, cap: 'resume' },
     ]
     for (const { when, cap } of needs) {
       if (when && !provider.capabilities[cap]) {
@@ -497,6 +503,36 @@ export class SubagentRuntime extends Service {
           'UNSUPPORTED_CAPABILITY',
         )
       }
+    }
+  }
+
+  /**
+   * Fail-closed authorization for a model-supplied {@link
+   * SubagentStartRequest.resumeId}: BEFORE any provider ever sees the id,
+   * verify the delegating agent's OWN session log recorded exactly this
+   * `(id, provider, permissionMode, cwd)` issuance ({@link verifyResumeIssuance}).
+   * One indistinguishable rejection covers both an id this session never
+   * issued at all and an id issued under a different scope (a different
+   * `permissionMode`, tool row, or cwd) — deliberately: a model that can tell
+   * the two failures apart gains a probing oracle for nothing. See the [Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md).
+   * @param name - the provider this call is dispatching to.
+   * @param request - the request carrying the model-supplied `resumeId`.
+   * @throws {SubagentError} `RESUME_REJECTED` when no matching issuance is found.
+   */
+  private assertResumeAuthorized(name: string, request: SubagentStartRequest): void {
+    const cwd = request.parent.session.header.cwd
+    const authorized = cwd !== undefined && verifyResumeIssuance(request.parent.session, {
+      id: request.resumeId as string,
+      provider: name,
+      permissionMode: request.permissionMode ?? 'read-only',
+      cwd,
+    } satisfies SubagentResumeIssuance)
+    if (!authorized) {
+      throw new SubagentError(
+        'subagent resume id was not issued in this scope by this harness session',
+        'RESUME_REJECTED',
+      )
     }
   }
 }

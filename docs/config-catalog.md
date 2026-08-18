@@ -2673,12 +2673,34 @@ export interface Config {
    * cancelled, never as a timeout.
    */
   timeoutSeconds?: number
+  /**
+   * Allow a call to request that its run remain resumable, and to resume a
+   * prior run by id (`resume`/`resume_id` tool arguments — absent from the
+   * schema entirely when this is `false`). Requires the provider's `resume`
+   * capability (mount fails loud otherwise). Default `false`: PR5 is an
+   * OPT-IN addition, not a reversal of the shipped default — every existing
+   * composition that never sets this stays exactly as before (Codex
+   * `ephemeral: true`, Claude `persistSession: false`, no continuation
+   * whatsoever). Requesting continuation is not a scope widening (unlike
+   * {@link permissionMode}, a deployment-only field): the model choosing to
+   * keep its own delegation resumable, or to continue one it already
+   * received an id for, is the model's own legitimate call — but the
+   * deployment still gates whether the parameter is ever reachable at all.
+   * Rejected at load with `backgroundMode: 'continuable'` and at call time
+   * for a background call (`run_in_background: true`): only a FOREGROUND
+   * call logs the session-log issuance record a later resume is verified
+   * against ([Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)),
+   * so a background resumable run would persist a provider-native thread
+   * with no way to ever resume it.
+   */
+  allowResume?: boolean
 }
 ```
 
 Depends on: [`AgentOptions`](subsystems/core.md) · [`SubagentPermissionMode`](../packages/subagent/subagent/src/index.ts)
 
-Source: [`packages/subagent/tool-subagent/src/index.ts:131`](../packages/subagent/tool-subagent/src/index.ts)
+Source: [`packages/subagent/tool-subagent/src/index.ts:160`](../packages/subagent/tool-subagent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-subagent-report"></a>
 

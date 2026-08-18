@@ -15,7 +15,14 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import { assertPositiveFinite, assertSubagentMaxDepth, SubagentError, settleRun } from '@deepseek-ai/dsh-subagent'
+import {
+  assertPositiveFinite,
+  assertSubagentMaxDepth,
+  ClassifiedSubagentFailure,
+  SubagentError,
+  settleRun,
+  SUBAGENT_RESUME_META_KEY,
+} from '@deepseek-ai/dsh-subagent'
 import type {
   SubagentFailureCode,
   SubagentFailureDetail,
@@ -121,6 +128,28 @@ function classifiedFailureHeadline(failure: SubagentFailureDetail): { headline: 
   }
 }
 
+/**
+ * Rethrow a rejected `ctx.subagents.start()` call, converting a classified
+ * native failure to the same routable, redacted headline the post
+ * -publication path already produces. Resuming an invalid/unknown id fails
+ * PRE-publication for Codex (`thread/resume` rejects before any thread
+ * exists — see the Agent Note), so this pre-publication catch needs the same
+ * classification `stopReasonFailure`/`classifiedFailureHeadline` already give
+ * a post-publication `SubagentResult.failure`. A `SubagentError` (e.g. this
+ * seam's own fail-closed resume-scope rejection) passes through unchanged —
+ * it is a harness-side rejection, not a native product failure, and is
+ * already a routable `HarnessError`.
+ * @param error - the rejection from `ctx.subagents.start()`.
+ * @returns never — always throws.
+ */
+function rethrowStartupFailure(error: unknown): never {
+  if (error instanceof ClassifiedSubagentFailure) {
+    const { headline, code } = classifiedFailureHeadline(error.failure)
+    throw new SubagentError(headline, code)
+  }
+  throw error
+}
+
 export const name = 'tool-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt']
 
@@ -204,6 +233,28 @@ export interface Config {
    * cancelled, never as a timeout.
    */
   timeoutSeconds?: number
+  /**
+   * Allow a call to request that its run remain resumable, and to resume a
+   * prior run by id (`resume`/`resume_id` tool arguments — absent from the
+   * schema entirely when this is `false`). Requires the provider's `resume`
+   * capability (mount fails loud otherwise). Default `false`: PR5 is an
+   * OPT-IN addition, not a reversal of the shipped default — every existing
+   * composition that never sets this stays exactly as before (Codex
+   * `ephemeral: true`, Claude `persistSession: false`, no continuation
+   * whatsoever). Requesting continuation is not a scope widening (unlike
+   * {@link permissionMode}, a deployment-only field): the model choosing to
+   * keep its own delegation resumable, or to continue one it already
+   * received an id for, is the model's own legitimate call — but the
+   * deployment still gates whether the parameter is ever reachable at all.
+   * Rejected at load with `backgroundMode: 'continuable'` and at call time
+   * for a background call (`run_in_background: true`): only a FOREGROUND
+   * call logs the session-log issuance record a later resume is verified
+   * against ([Agent
+   * Note](../../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-resume.md)),
+   * so a background resumable run would persist a provider-native thread
+   * with no way to ever resume it.
+   */
+  allowResume?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -233,6 +284,7 @@ export const Config: z<Config> = z.object({
   // `spawn`/`fork` composition's long-running delegations. Omission stays
   // `undefined` through the Loader, same as `persona`/`permissionMode` above.
   timeoutSeconds: z.number(),
+  allowResume: z.boolean().default(false),
 })
 
 /** Render text blocks from the canonical JSON block array without trusting arbitrary values. */
@@ -267,6 +319,17 @@ function renderUsageNote(usage: SubagentUsage | undefined): string {
     ? ` (${usage.cacheReadTokens} cached read, ${usage.cacheWriteTokens} cached write)`
     : ''
   return `\n\nTokens used: ${usage.inputTokens} in, ${usage.outputTokens} out${cache}`
+}
+
+/**
+ * Model-facing resume-id note, or `''` when the run reported none (the
+ * default, non-opted-in case reports no key at all).
+ * @param resumeId - the settled result's `resumeId`, if any.
+ * @returns the note text, prefixed with its own blank-line separator, or `''`.
+ */
+function renderResumeNote(resumeId: string | undefined): string {
+  if (resumeId === undefined) return ''
+  return `\n\nResume id: ${resumeId} (pass resume_id: "${resumeId}" in a later call to continue this exact run)`
 }
 
 /** Settle pending startup without rejecting the task producer contract. */
@@ -346,6 +409,15 @@ type ForegroundToolResult = {
   readonly changedFiles?: string[]
   /** Normalized token usage, present only when the provider reported any. */
   readonly usage?: SubagentUsage
+  /** Resume id for this run's thread, present only when `allowResume` is configured and the provider returned one. */
+  readonly resumeId?: string
+  /**
+   * This call's own resolved cwd, present only alongside {@link resumeId}.
+   * NOT rendered to the model (see {@link renderResumeNote}) — carries the
+   * scope `presentationMeta` needs to write the durable issuance record,
+   * since a presenter has no access to the calling `exec`/`Agent`.
+   */
+  readonly resumeCwd?: string
 }
 
 /**
@@ -355,8 +427,12 @@ type ForegroundToolResult = {
  * @param deadlineSignal - this call's composed signal, forwarded to
  *   {@link stopReasonFailure} so a timeout reports distinctly from a caller
  *   cancellation.
+ * @param cwd - this call's resolved cwd, attached alongside a reported
+ *   `resumeId` so `presentationMeta` can write the issuance record; absent
+ *   when the parent session has no cwd (a request that also fails at the
+ *   provider for the same reason before this ever matters).
  */
-async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal): Promise<ForegroundToolResult> {
+async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal, cwd: string | undefined): Promise<ForegroundToolResult> {
   const [execution] = await Promise.allSettled([
     run.result.then((result): ForegroundToolResult => {
       const failure = stopReasonFailure(result, deadlineSignal)
@@ -380,6 +456,9 @@ async function settleForegroundRun(run: SubagentRun, deadlineSignal: AbortSignal
           ? { changedFiles: [...result.changedFiles] }
           : {},
         ...result.usage !== undefined ? { usage: result.usage } : {},
+        ...result.resumeId !== undefined && cwd !== undefined
+          ? { resumeId: result.resumeId, resumeCwd: cwd }
+          : {},
       }
     }),
   ])
@@ -495,6 +574,18 @@ export function apply(ctx: Context, config: Config): void {
       )
     }
   }
+  const allowResume = config.allowResume === true
+  // A continuable child already has its own durable identity and turn
+  // ordering owned by the continuation manager; this resume mechanism exists
+  // for the one-shot foreground/background path this tool itself owns.
+  // Config-vs-config, fully self-contained: fail at load, not at the first
+  // delegation (same rule as `timeoutSeconds` above).
+  if (allowResume && continuable) {
+    throw new Error(
+      'tool-subagent: `allowResume` cannot be combined with `backgroundMode: \'continuable\'` — '
+      + 'a continuable child already has its own durable identity and turn ordering',
+    )
+  }
   const toolName = config.toolName ?? 'subagent'
   // Mirror provider lifecycle because sibling load order and HMR replacement
   // can change provider availability while this fiber remains active.
@@ -516,6 +607,15 @@ export function apply(ctx: Context, config: Config): void {
       throw new Error(
         `tool-subagent: provider "${provider.name}" cannot enforce permissionMode (no permissionMode capability) — `
         + 'remove the key to leave the provider\'s own default in place',
+      )
+    }
+    // Configured only when the deployer explicitly opts in; omission never
+    // reaches this check, so it never fires for a plain `spawn`/`fork`/`acp`/
+    // `dsh-sdk` composition.
+    if (allowResume && !provider.capabilities.resume) {
+      throw new Error(
+        `tool-subagent: provider "${provider.name}" cannot enforce resume (no resume capability) — `
+        + 'set allowResume: false (or remove the key) for this provider',
       )
     }
     const wording = providerWording(provider.inheritsParentContext)
@@ -551,6 +651,19 @@ export function apply(ctx: Context, config: Config): void {
             description: continuable
               ? 'Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it.'
               : 'Whether to run as a background job and return its id. Defaults to false; collect with job_output or stop with job_kill.',
+          },
+        } : {},
+        // Byte-identical schema when the deployment has not opted in
+        // (`allowResume: false`, the default): PR5 never changes what an
+        // existing composition's model sees.
+        ...allowResume ? {
+          resume: {
+            type: 'boolean' as const,
+            description: 'Whether to keep this run\'s exact context available so a later call can continue it with resume_id. Ignored when resume_id is set (a continued run is already resumable).',
+          },
+          resume_id: {
+            type: 'string' as const,
+            description: 'A resume id from a prior call\'s result to continue that exact run (same context) instead of starting fresh. Only a resume id this tool itself returned earlier in this conversation is valid; only meaningful for a foreground call.',
           },
         } : {},
       },
@@ -595,6 +708,15 @@ export function apply(ctx: Context, config: Config): void {
                     cacheWriteTokens: { type: 'number', required: true },
                   },
                 },
+                // Model-visible: the model needs this value back to pass as
+                // `resume_id` on a later call. Present only when `allowResume`
+                // is configured and the provider actually returned one.
+                ...allowResume ? { resumeId: { type: 'string' } } : {},
+                // NOT rendered to the model — carries this call's resolved cwd
+                // for `presentationMeta` alone, so the durable issuance record
+                // it writes is scope-bound without needing tool-call context
+                // `presentationMeta` itself has no access to. See the Agent Note.
+                ...allowResume ? { resumeCwd: { type: 'string' } } : {},
               },
             },
           ],
@@ -605,8 +727,37 @@ export function apply(ctx: Context, config: Config): void {
             ? `started background subagent task ${value.jobId}`
             : value.kind === 'continuable'
               ? `started subagent ${value.subagentId}`
-              : outputValueText(value.output) + renderChangedFilesNote(value.changedFiles) + renderUsageNote(value.usage),
+              : outputValueText(value.output) + renderChangedFilesNote(value.changedFiles) + renderUsageNote(value.usage)
+                + (allowResume ? renderResumeNote(value.resumeId) : ''),
         }],
+        // Gated on `allowResume`, not unconditionally present: a conditional
+        // SPREAD of `presentationMeta` into `output` defeats `defineTool`'s
+        // `const O`/`execute()` generic inference (confirmed empirically —
+        // every downstream `execute` type collapses to `never`), so this uses
+        // a conditional EXPRESSION instead. `exactOptionalPropertyTypes`
+        // still rejects a ternary whose false branch is the literal
+        // `undefined` for an optional function property, so that one branch
+        // alone is cast (`undefined as never`, assignable to anything,
+        // without touching the true branch's contextual inference). The net
+        // effect: when `allowResume` is false (the default), `defineTool`
+        // omits `output.presentationMeta` from the built `ToolDefinition`
+        // entirely (see `defineTool`'s own conditional spread), so
+        // `tool/result.meta` stays fully absent — byte-identical to a
+        // pre-PR5 subagent call. Only an `allowResume: true` deployment ever
+        // stamps `meta.subagentResume`.
+        presentationMeta: allowResume
+          ? (_args, value) =>
+            value.kind === 'foreground' && value.resumeId !== undefined && value.resumeCwd !== undefined
+              ? {
+                [SUBAGENT_RESUME_META_KEY]: {
+                  id: value.resumeId,
+                  provider: config.provider,
+                  permissionMode: config.permissionMode ?? 'read-only',
+                  cwd: value.resumeCwd,
+                },
+              }
+              : null
+          : undefined as never,
       },
       // Children never mutate the parent session; the one parent-owned write
       // (tasks.start) is a synchronous commutative insertion.
@@ -619,6 +770,12 @@ export function apply(ctx: Context, config: Config): void {
         }
 
         const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
+        // The validator permits undeclared keys even when `allowResume` is
+        // false, so schema omission also needs execution-time enforcement —
+        // the same rule `resolveDelegationRun` already applies to
+        // `run_in_background`.
+        const requestResume = allowResume && args.resume === true
+        const resumeId = allowResume ? args.resume_id : undefined
         const request = {
           label: args.description,
           prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
@@ -628,6 +785,8 @@ export function apply(ctx: Context, config: Config): void {
           ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
           ...maxDepth !== undefined ? { maxDepth } : {},
           ...config.permissionMode !== undefined ? { permissionMode: config.permissionMode } : {},
+          ...requestResume ? { requestResume: true } : {},
+          ...resumeId !== undefined ? { resumeId } : {},
         }
 
         // `timeoutMs <= 0` is `deadline()`'s own no-timer sentinel: an omitted
@@ -637,6 +796,15 @@ export function apply(ctx: Context, config: Config): void {
 
         const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
         if (runSpec.runInBackground) {
+          // Only a FOREGROUND call logs the session-log issuance record a
+          // later resume is verified against (`presentationMeta` above runs
+          // only for the registry's own top-level result path). A background
+          // resumable run would persist a provider-native thread with no
+          // record ever written for it to resume against — reject clearly
+          // instead of silently starting an unresumable "resumable" run.
+          if (requestResume || resumeId !== undefined) {
+            throw new Error('resume/resume_id is only available for a foreground call (run_in_background: false)')
+          }
           if (continuable) {
             // Resolves at inbox acceptance: the child owns its own turns from
             // there, so this call neither waits for nor collects a result.
@@ -693,9 +861,10 @@ export function apply(ctx: Context, config: Config): void {
           })
         } catch (error: unknown) {
           const timedOut = timeoutOf(runDeadline.signal, SUBAGENT_TIMEOUT_CODE)
-          throw timedOut !== undefined ? new Error(timeoutHeadline(timedOut.timeoutMs)) : error
+          if (timedOut !== undefined) throw new Error(timeoutHeadline(timedOut.timeoutMs))
+          rethrowStartupFailure(error)
         }
-        return await settleForegroundRun(run, runDeadline.signal)
+        return await settleForegroundRun(run, runDeadline.signal, parent.session.header.cwd)
       },
     }))
   }

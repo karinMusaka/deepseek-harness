@@ -4095,7 +4095,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentCapabilities',
-    declaration: 'export interface SubagentCapabilities {\n    readonly outputSchema: boolean;\n    readonly depthLimit: boolean;\n    readonly toolFilter: boolean;\n    readonly persona: boolean;\n    readonly permissionMode: boolean;\n}',
+    declaration: 'export interface SubagentCapabilities {\n    readonly outputSchema: boolean;\n    readonly depthLimit: boolean;\n    readonly toolFilter: boolean;\n    readonly persona: boolean;\n    readonly permissionMode: boolean;\n    readonly resume: boolean;\n}',
   },
   {
     name: 'SubagentDescendantListEntry',
@@ -4139,7 +4139,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentResult',
-    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n    readonly failure?: SubagentFailureDetail;\n    readonly authMode?: \'subscription\' | \'api-key\';\n    readonly changedFiles?: readonly string[];\n    readonly usage?: SubagentUsage;\n}',
+    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly stopReason: SubagentStopReason;\n    readonly failure?: SubagentFailureDetail;\n    readonly authMode?: \'subscription\' | \'api-key\';\n    readonly changedFiles?: readonly string[];\n    readonly usage?: SubagentUsage;\n    readonly resumeId?: string;\n}',
   },
   {
     name: 'SubagentRun',
@@ -4163,7 +4163,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly permissionMode?: SubagentPermissionMode;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly permissionMode?: SubagentPermissionMode;\n    readonly requestResume?: boolean;\n    readonly resumeId?: string;\n}',
   },
   {
     name: 'SubagentStopReason',
