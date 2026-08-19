@@ -216,7 +216,12 @@ export interface Config {
    * forbids every write-capable operation; `workspace-write` confines writes
    * to the child's working directory. This is deployment configuration, never
    * a model-facing tool argument — a permission-widening decision belongs to
-   * whoever writes the composition, not the delegating model.
+   * whoever writes the composition, not the delegating model. An explicit
+   * value IS stated in the tool `description` (see
+   * {@link permissionScopeWording}), so two rows against the same provider
+   * that differ only by this field remain distinguishable to the model;
+   * omission adds nothing to the description, since the tool layer does not
+   * know the provider's own default.
    */
   permissionMode?: SubagentPermissionMode
   /**
@@ -517,6 +522,32 @@ function providerWording(inheritsConversation: boolean): { description: string; 
   }
 }
 
+/**
+ * Model-facing sentence naming this instance's fixed permission scope, or
+ * `''` when the deployment left the field unconfigured — the tool layer must
+ * not guess the provider's own default (see {@link Config.permissionMode}'s
+ * JSDoc), so an omitted scope stays silent rather than stating a value this
+ * tool does not actually know. Two tool rows against the same provider that
+ * only differ by an explicit `permissionMode` would otherwise present
+ * byte-identical descriptions, leaving the model to guess which one can write
+ * from the tool name alone.
+ * @param permissionMode - this instance's configured `Config.permissionMode`.
+ * @returns the appended sentence (starting with a space), or `''`.
+ */
+function permissionScopeWording(permissionMode: SubagentPermissionMode | undefined): string {
+  switch (permissionMode) {
+    case undefined:
+      return ''
+    case 'read-only':
+      return ' This subagent cannot write, edit, or otherwise change anything; it can only read and investigate.'
+    case 'workspace-write':
+      return ' This subagent can create, edit, and delete files in its own working directory.'
+    /* v8 ignore next 2 -- closed-union exhaustiveness guard */
+    default:
+      return assertNever(permissionMode, 'permissionScopeWording')
+  }
+}
+
 interface DelegationRunRequest {
   readonly run_in_background?: boolean
 }
@@ -628,7 +659,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     disposeTool = ctx.tools.register(defineTool({
       name: toolName,
-      description: wording.description + (backgroundEnabled
+      description: wording.description + permissionScopeWording(config.permissionMode) + (backgroundEnabled
         // The completion notice is the continuation service's own behavior, not
         // a separately installed capability, so this promise holds whenever the
         // continuable background path is reachable at all.

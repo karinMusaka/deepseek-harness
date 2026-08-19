@@ -14,7 +14,7 @@
 
 `toolFilter` 会改变子 agent 的全局工具层，但不是从父级派生的权限上限。见 [agent 作用域的安全非目标](../../../.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md#security-and-authority-are-non-goals)。
 
-`permissionMode` 会为本工具实例发起的每一次委派固定子 agent 的权限范围；它是部署配置，绝不是模型可见的工具参数——模型无法为某一次调用请求更宽的范围。省略该键会保留提供方自身的默认值（对每个具备该能力的提供方而言均为 `read-only`）；显式设置该值则要求提供方具备 `permissionMode` 能力，缺失时挂载会失败。见[审批钉定 Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md)和[权限范围 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md)。
+`permissionMode` 会为本工具实例发起的每一次委派固定子 agent 的权限范围；它是部署配置，绝不是模型可见的工具参数——模型无法为某一次调用请求更宽的范围。省略该键会保留提供方自身的默认值（对每个具备该能力的提供方而言均为 `read-only`）；显式设置该值则要求提供方具备 `permissionMode` 能力，缺失时挂载会失败。显式设置的值*会*体现在工具的 `description` 中（附加一句说明子 agent 能做什么、不能做什么的话），因此针对同一提供方、仅在该字段上不同的两个工具行，在模型看来仍可区分；省略该字段则不会在描述中添加任何内容，因为工具层并不知道提供方自身的默认值。见[审批钉定 Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md)、[权限范围 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-permission-scope.md)和[范围描述 Agent Note](../../../.agents/notes/implemented/feature/2026-08-18-subagent-delegation-scope-description.md)。
 
 `timeoutSeconds` 会以本实例自身的墙钟时间，限定一次前台调用与一次一次性后台调用——这两种运行都由本工具从头到尾拥有，因此其计时器不仅覆盖被等待的结果，也覆盖 `ctx.subagents.start()` 本身（例如启动期卡死的提供方，而不仅是结果挂起）。到期时，合成信号的中止方式与调用方取消完全相同，但前台工具结果会读作超时而非取消，而真正的调用方取消即便与已启动的计时器竞争，仍会读作取消。省略该键会保留现有行为：没有上限。将其与 `backgroundMode: 'continuable'` 一起配置会在加载期失败——可继续子 agent 的轮次在 inbox 接受之后归继续执行服务所有，而不属于本工具，因此这里没有可供计时器终止的运行。见[墙钟超时 Agent Note](../../../.agents/notes/implemented/feature/2026-08-17-subagent-delegation-timeout.md)。
 
@@ -42,7 +42,7 @@
 | `persona` | 每个子 agent 独立的 persona；要求提供方具备 `persona` 能力。 |
 | `toolFilter` | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力。 |
 | `maxDepth` | 绝对委派深度上限，默认 `3`（`0` 禁止委派）；数值上限要求 `depthLimit` 能力，缺失时挂载失败。对于预算由子 harness 拥有的进程外提供方，`'provider-managed'` 不发送上限。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。 |
-| `permissionMode` | 固定的子 agent 权限范围（`'read-only'` \| `'workspace-write'`）；要求 `permissionMode` 能力，缺失时挂载失败。省略则保留提供方自身的默认值（`read-only`）。模型永远不可见——仅是部署方的选择。 |
+| `permissionMode` | 固定的子 agent 权限范围（`'read-only'` \| `'workspace-write'`）；要求 `permissionMode` 能力，缺失时挂载失败。省略则保留提供方自身的默认值（`read-only`）。永远不是工具参数——仅是部署方的选择——但显式设置的值会体现在工具 `description` 中；省略该字段则不会在描述中添加任何内容。 |
 | `timeoutSeconds` | 本实例自身前台运行与一次性后台运行的墙钟上限（秒）；必须是正的有限数，且换算为毫秒后不超过 `MAX_TIMER_DELAY_MS`（`@deepseek-ai/dsh-timeout`）。省略则不设上限（现有行为）；不会具体化 Schemastery 默认值，因此现有的 `spawn`／`fork` 组合在部署方主动启用之前不受影响。与 `backgroundMode: 'continuable'` 一起配置会在加载期失败。 |
 | `allowResume` | 公开 `resume`／`resume_id` 工具参数与 `resumeId` 结果字段，默认 `false`。要求 `resume` 能力，缺失时挂载失败。与 `backgroundMode: 'continuable'` 一起配置会在加载期失败。见上文「Resume（可选）」。 |
 
@@ -56,7 +56,7 @@
 
 #### 模型看到的内容
 
-当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent)。提供方是否继承上下文会改变工具描述和提示词描述。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；工具限制会同时移除其 schema 和这段指引。
+当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent)。提供方是否继承上下文会改变工具描述和提示词描述。已配置的 `permissionMode` 会附加一句说明子 agent 能做什么、不能做什么的话（省略该字段时不附加任何内容，因为工具层并不知道提供方自身的默认值）。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；工具限制会同时移除其 schema 和这段指引。
 
 #### Token 影响
 

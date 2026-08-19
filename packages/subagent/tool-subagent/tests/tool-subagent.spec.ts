@@ -592,6 +592,41 @@ describe('dsh-tool-subagent', () => {
     expect(props['prompt']!.description).toContain('completed turns')
   })
 
+  it('states a read-only permissionMode in the tool description', async () => {
+    const ctx = await setup(
+      { provider: 'mock', permissionMode: 'read-only' },
+      { capabilities: { permissionMode: true } },
+    )
+    const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+    expect(schema.description).toContain(
+      'This subagent cannot write, edit, or otherwise change anything; it can only read and investigate.',
+    )
+    // Append, not rewrite: the base wording survives alongside the appended scope sentence.
+    expect(schema.description).toContain('does not see this conversation')
+  })
+
+  it('states a workspace-write permissionMode in the tool description', async () => {
+    const ctx = await setup(
+      { provider: 'mock', permissionMode: 'workspace-write' },
+      { capabilities: { permissionMode: true } },
+    )
+    const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+    expect(schema.description).toContain(
+      'This subagent can create, edit, and delete files in its own working directory.',
+    )
+    expect(schema.description).toContain('does not see this conversation')
+  })
+
+  it('says nothing about permission scope when permissionMode is omitted, even against a capable provider', async () => {
+    const ctx = await setup(
+      { provider: 'mock' },
+      { capabilities: { permissionMode: true } },
+    )
+    const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+    expect(schema.description).not.toMatch(/permission|read-only|workspace-write|cannot write|create, edit, and delete/)
+    expect(schema.description).toContain('does not see this conversation')
+  })
+
   it('disposes the run on the success path (no leaked child)', async () => {
     // Spy on the provider's run.dispose via a wrapping provider registered
     // directly on the service, then point the tool at it.

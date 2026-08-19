@@ -2656,7 +2656,12 @@ export interface Config {
    * forbids every write-capable operation; `workspace-write` confines writes
    * to the child's working directory. This is deployment configuration, never
    * a model-facing tool argument — a permission-widening decision belongs to
-   * whoever writes the composition, not the delegating model.
+   * whoever writes the composition, not the delegating model. An explicit
+   * value IS stated in the tool `description` (see
+   * {@link permissionScopeWording}), so two rows against the same provider
+   * that differ only by this field remain distinguishable to the model;
+   * omission adds nothing to the description, since the tool layer does not
+   * know the provider's own default.
    */
   permissionMode?: SubagentPermissionMode
   /**
