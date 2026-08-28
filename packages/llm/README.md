@@ -12,6 +12,7 @@ The LLM seam and its provider adapters. The `llm` package owns both the Service 
 | [`llm-deepseek/`](llm-deepseek/README.md) | Direct DeepSeek adapter | registers on `ctx.llm` |
 | [`llm-ollama/`](llm-ollama/README.md) | Ollama NDJSON adapter | registers on `ctx.llm` |
 | [`llm-pi-ai/`](llm-pi-ai/README.md) | Multi-provider pi-ai adapter | registers on `ctx.llm` |
+| [`tool-classify-image/`](tool-classify-image/README.md) | `classify_image` relay to an auxiliary vision route | consumes `ctx.llm` |
 
 Adapters register provider routes on the seam; retry and token measurement remain separate consumers. The child READMEs own routing, metadata, replay, and provider-wire details; the [LLM architecture decisions](../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.md) own the rationale.
 

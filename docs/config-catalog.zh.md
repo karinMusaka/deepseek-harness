@@ -2429,6 +2429,28 @@ export interface Config {
 
 来源：[`packages/shell/tool-bash-persistent/src/index.ts:400`](../packages/shell/tool-bash-persistent/src/index.ts)
 
+<a id="deepseek-aidsh-tool-classify-image"></a>
+
+## `@deepseek-ai/dsh-tool-classify-image`
+
+需要：`tools` · `llm` · `fs` · `attachments`
+
+```ts config-catalog
+/** Plugin config: the auxiliary vision route and the bounds each call runs under. */
+export interface Config {
+  /** Provider route carrying the vision model; must be supplied together with `model`. */
+  provider?: string
+  /** Exact vision model id; must be supplied together with `provider`. */
+  model?: string
+  /** Output-token cap for each of the two auxiliary requests. Defaults to 128. */
+  maxTokens?: number
+  /** Cooperative tool-call budget (ms) covering both requests. Defaults to 120000. */
+  timeoutMs?: number
+}
+```
+
+来源：[`packages/llm/tool-classify-image/src/index.ts:60`](../packages/llm/tool-classify-image/src/index.ts)
+
 <a id="deepseek-aidsh-tool-fs"></a>
 
 ## `@deepseek-ai/dsh-tool-fs`

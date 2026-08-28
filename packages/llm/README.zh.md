@@ -12,6 +12,7 @@ LLM（大语言模型）seam 及其提供方适配器。`llm` 包同时承担 Se
 | [`llm-deepseek/`](llm-deepseek/README.md) | 直接 DeepSeek 适配器 | 注册到 `ctx.llm` |
 | [`llm-ollama/`](llm-ollama/README.md) | Ollama NDJSON 适配器 | 注册到 `ctx.llm` |
 | [`llm-pi-ai/`](llm-pi-ai/README.md) | 多提供方 pi-ai 适配器 | 注册到 `ctx.llm` |
+| [`tool-classify-image/`](tool-classify-image/README.md) | 将 `classify_image` 转接到辅助视觉路由 | 消费 `ctx.llm` |
 
 适配器在 seam 上注册提供方路由；重试与 token 测量仍是独立消费方。子 README 负责路由、元数据、回放和提供方协议细节；[LLM 架构决策](../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.md)说明设计原理。
 

@@ -49,6 +49,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'step/start',
   'subagent/descriptor',
   'todo/write',
+  'tool-classify-image/request',
   'tool-workflow/agent-end',
   'tool-workflow/agent-start',
   'tool-workflow/run-end',

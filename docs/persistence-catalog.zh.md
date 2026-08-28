@@ -817,6 +817,19 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/core/session/src/types.ts:291`](../packages/core/session/src/types.ts)
 
+### `tool-classify-image/*`
+
+<a id="tool-classify-imagerequest--log-only"></a>
+
+#### `tool-classify-image/request` — log-only
+
+```ts persistence-catalog
+/** Log-only pre-dispatch record of one `classify_image` auxiliary vision request pair. */
+'tool-classify-image/request': ClassifyImageRequestEventData
+```
+
+来源：[`packages/llm/tool-classify-image/src/index.ts:33`](../packages/llm/tool-classify-image/src/index.ts)
+
 ### `tool-workflow/*`
 
 <a id="tool-workflowagent-end--log-only"></a>

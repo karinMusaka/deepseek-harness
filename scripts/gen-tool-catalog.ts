@@ -45,6 +45,8 @@ import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
 import * as ToolBashPersistent from '@deepseek-ai/dsh-tool-bash-persistent'
 import CordisHostRunner from '@deepseek-ai/dsh-cordis-host-runner'
 import * as ToolCordis from '@deepseek-ai/dsh-tool-cordis'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
+import * as ToolClassifyImage from '@deepseek-ai/dsh-tool-classify-image'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolStrReplaceEditor from '@deepseek-ai/dsh-tool-str-replace-editor'
@@ -292,6 +294,21 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'Standalone view/create/unique literal replace/line insert tool over the filesystem seam; it composes with any shell or terminal API.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-classify-image',
+    dir: 'tool-classify-image',
+    source: 'packages/llm/tool-classify-image/src/index.ts',
+    requires: ['ctx.tools', 'ctx.llm + an image-capable route', 'ctx.fs', 'ctx.attachments'],
+    writes: ['tool/call', 'fs/observed after image presence/absence', 'durable attachment', 'tool-classify-image/request before the auxiliary dispatch', 'tool/result'],
+    async mount(ctx) {
+      await ctx.plugin(LocalFileSystem)
+      await ctx.plugin(CatalogAttachmentStore)
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(ToolClassifyImage)
+    },
+    note:
+      'Relays one local image file to a configured auxiliary vision route and returns text labels only; the image never enters the calling session, so the tool stays usable on a text-only model.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-fs',

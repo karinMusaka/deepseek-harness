@@ -102,7 +102,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Durable binary attachment storage',
     mode: 'seam',
     implementations: ['attachment-local'],
-    consumers: ['host-runtime', 'llm-ollama', 'llm-pi-ai'],
+    consumers: ['host-runtime', 'llm-ollama', 'llm-pi-ai', 'tool-classify-image'],
     note: 'The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content.',
   },
   {
@@ -111,8 +111,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'LLM adapter registry',
     mode: 'seam',
     implementations: ['llm-deepseek', 'llm-ollama', 'llm-pi-ai', 'llm-replay'],
-    consumers: ['agent-loop', 'compaction-basic'],
-    note: 'Adapters register provider implementations; the loop and compaction call the provider-neutral stream service.',
+    consumers: ['agent-loop', 'compaction-basic', 'tool-classify-image'],
+    note: 'Adapters register provider implementations; the loop, compaction, and the vision-relay tool call the provider-neutral stream service.',
   },
   {
     key: 'tokenMeter',
@@ -266,7 +266,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'tools',
     title: 'Tool registry and guarded execution pipeline',
     mode: 'core',
-    consumers: ['agent-loop', 'tool-ask-user', 'tool-bash', 'tool-cordis', 'tool-fs', 'tool-terminal', 'tool-skill', 'tool-subagent', 'tool-todo', 'tool-web'],
+    consumers: ['agent-loop', 'tool-ask-user', 'tool-bash', 'tool-classify-image', 'tool-cordis', 'tool-fs', 'tool-terminal', 'tool-skill', 'tool-subagent', 'tool-todo', 'tool-web'],
     note: 'Registers capabilities, owns Code Mode transport, and routes calls through pre-policy, monotonic guards, around dispatch, post-policy, and final-result observation.',
   },
   {
@@ -447,9 +447,9 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Filesystem provider seam',
     mode: 'seam',
     implementations: ['fs-local', 'fs-sandbox', 'fs-e2b'],
-    consumers: ['tool-fs'],
+    consumers: ['tool-fs', 'tool-classify-image'],
     companions: ['fs-observation-policy'],
-    note: 'tool-fs executes read/write/edit through ctx.fs; fs-sandbox fences mutations by the shared sandbox mode; fs-observation-policy contributes observed-state checks through the fs/* event gate.',
+    note: 'tool-fs executes read/write/edit through ctx.fs; tool-classify-image reads image bytes through it; fs-sandbox fences mutations by the shared sandbox mode; fs-observation-policy contributes observed-state checks through the fs/* event gate.',
   },
   {
     key: 'compaction',
