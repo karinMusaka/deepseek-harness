@@ -893,6 +893,61 @@ export interface DeepSeekCatalogModel {
 
 来源：[`packages/llm/llm-deepseek/src/index.ts:62`](../packages/llm/llm-deepseek/src/index.ts)
 
+<a id="deepseek-aidsh-llm-ollama"></a>
+
+## `@deepseek-ai/dsh-llm-ollama`
+
+需要：`llm`
+
+```ts config-catalog
+/**
+ * Plugin config, validated by the same-named schemastery schema and doubling
+ * as the `llm-ollama` settings-section shape. Every field is optional in yml:
+ * an omitted endpoint resolves through `$OLLAMA_BASE_URL` and then the
+ * server's default local address, and an omitted catalog advertises no model
+ * while every request id still passes through as a text-only model.
+ */
+export interface Config {
+  /** Endpoint base; falls back to $OLLAMA_BASE_URL from a trusted environment layer, then the default local server. */
+  baseURL?: string
+  /** Default per-request output cap (default 2,048); a model's own cap and explicit request values win. */
+  maxTokens?: number
+  /** Positive context capacity used when the selected model has no exact value (default 4,096). */
+  defaultContextWindow?: number
+  /** Advisory models shown by discovery consumers, and the one place a model's image support is declared. */
+  models?: OllamaCatalogModel[]
+  /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
+  streamIdleTimeoutMs?: number
+  /** Provider-owned model-request retry policy; omission uses normal defaults. */
+  retryPolicy?: RetryPolicyConfig
+}
+
+/** One model entry advertised by the adapter. */
+export interface OllamaCatalogModel {
+  /** Wire model id, exactly as `ollama list` reports it (for example `moondream:latest`). */
+  id: string
+  /** Selector label; defaults to {@link id}. */
+  name?: string
+  /** Optional selector detail for deployments with similar model variants. */
+  description?: string
+  /** Known combined request/response context capacity; omitted when the deployment does not state one. */
+  contextWindow?: number
+  /** Per-request output cap for this model; omission falls back to {@link OllamaConnectionOptions.maxTokens}. */
+  maxTokens?: number
+  /**
+   * Request modalities this model accepts. An omitted or empty list means text
+   * only: a deployment declares `image` for a vision model, and every
+   * undeclared or uncatalogued model refuses image content instead of sending
+   * bytes a text-only model would answer about blindly.
+   */
+  inputModalities?: ModelModality[]
+}
+```
+
+依赖：[`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts)
+
+来源：[`packages/llm/llm-ollama/src/index.ts:57`](../packages/llm/llm-ollama/src/index.ts)
+
 <a id="deepseek-aidsh-llm-pi-ai"></a>
 
 ## `@deepseek-ai/dsh-llm-pi-ai`
