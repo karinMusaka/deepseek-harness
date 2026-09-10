@@ -22,7 +22,7 @@ import type { ClientModuleSystem } from '@deepseek-ai/dsh-client-modules/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import { DYNAMIC_CLIENT_REDIRECTS } from '../src/client/evaluator.ts'
 import { DynamicCordisPackageRunner } from '../src/client/runtime.ts'
-import type { DynamicCordisClientHalf, DynamicCordisRenderFailure } from '../src/client/runtime.ts'
+import type { DynamicCordisClientHalf, DynamicCordisLoadOverrides, DynamicCordisRenderFailure } from '../src/client/runtime.ts'
 
 const PLUGIN = 'dyn-1' as CordisDynamicPluginId
 const PACKAGE = 'pkg-1' as CordisDynamicPackageId
@@ -60,6 +60,13 @@ interface Bench {
     pluginId: CordisDynamicPluginId
     pluginRunId: CordisDynamicPluginRunId
     failure: DynamicCordisRenderFailure
+  }[]
+  /** Guard rejections the runner sent to the environment outlet, in order. */
+  guardReported: {
+    agentId: SessionId
+    pluginId: CordisDynamicPluginId
+    pluginRunId: CordisDynamicPluginRunId
+    message: string
   }[]
   /**
    * Report one entry crash the way the renderer's boundary does: the runner
@@ -114,6 +121,7 @@ async function boot(): Promise<Bench> {
 
   const invoke = vi.fn(() => Promise.resolve(null))
   const reported: Bench['reported'] = []
+  const guardReported: Bench['guardReported'] = []
   // The crash seam is stood in so a test can report an entry failure without a
   // React render, exactly as the renderer's boundary would; registrations still
   // go through the real service, so the entries are real.
@@ -130,7 +138,9 @@ async function boot(): Promise<Bench> {
       },
     } as unknown as SlotRegistry,
     invoke,
-    reportGuardFailure: () => {},
+    reportGuardFailure: (agentId, pluginId, pluginRunId, failure) => {
+      guardReported.push({ agentId, pluginId, pluginRunId, message: failure.message })
+    },
     reportRenderFailure: (agentId, pluginId, pluginRunId, failure) => {
       reported.push({ agentId, pluginId, pluginRunId, failure })
     },
@@ -144,6 +154,7 @@ async function boot(): Promise<Bench> {
     created,
     invoke,
     reported,
+    guardReported,
     crash: (slot, entry, error, abdicated = true) => {
       if (listener === undefined) throw new Error('the runner is not watching the crash seam')
       listener(slot, entry, error, { abdicated })
@@ -513,5 +524,117 @@ describe('render failures', () => {
     // still true of what is mounted.
     await bench.runner.load(half({ code: CONTRIBUTOR }))
     expect(bench.runner.renderFailures.getSnapshot().size).toBe(1)
+  })
+})
+
+describe('load with overrides', () => {
+  /** A package that seats one component in `root`, so a crash has something to name. */
+  const CONTRIBUTOR = `return {
+    inject: ['slots'],
+    apply(ctx) { ctx.slots.register({ name: 'root' }, () => null) },
+  }`
+
+  it('routes host.call to the given overrides.invoke, not the environment\'s', async () => {
+    const bench = await boot()
+    const invoke = vi.fn(() => Promise.resolve('overridden'))
+    const overrides: DynamicCordisLoadOverrides = {
+      invoke,
+      reportGuardFailure: vi.fn(),
+      reportRenderFailure: vi.fn(),
+    }
+    await bench.runner.load(half({ code: 'return { apply: () => host.call("ping", 1) }' }), overrides)
+    expect(invoke).toHaveBeenCalledWith('ping', 1)
+    expect(bench.invoke).not.toHaveBeenCalled()
+  })
+
+  it('still sends a post-activation guard rejection to the environment when load has no overrides', async () => {
+    const bench = await boot()
+    await bench.runner.load(half({
+      code: 'return { apply(ctx) { ctx.on("t/ping", () => { ctx.slots }) } }',
+    }))
+    expect(() => { (bench.ctx.emit as (type: string) => void)('t/ping') })
+      .toThrow(/service "slots" is not declared by your plugin/)
+    expect(bench.guardReported).toEqual([{
+      agentId: AGENT,
+      pluginId: PLUGIN,
+      pluginRunId: RUN,
+      message: expect.stringContaining('service "slots" is not declared by your plugin') as string,
+    }])
+  })
+
+  it('sends a post-activation guard rejection to the given outlet, not the environment\'s', async () => {
+    const bench = await boot()
+    const reportGuardFailure = vi.fn()
+    const overrides: DynamicCordisLoadOverrides = {
+      invoke: vi.fn(() => Promise.resolve(null)),
+      reportGuardFailure,
+      reportRenderFailure: vi.fn(),
+    }
+    // No `inject` declared: reaching `ctx.slots` from an event handler that runs
+    // after activation settled is the reachable post-activation guard path.
+    await bench.runner.load(half({
+      code: 'return { apply(ctx) { ctx.on("t/ping", () => { ctx.slots }) } }',
+    }), overrides)
+    expect(() => { (bench.ctx.emit as (type: string) => void)('t/ping') })
+      .toThrow(/service "slots" is not declared by your plugin/)
+    expect(reportGuardFailure).toHaveBeenCalledWith({
+      message: expect.stringContaining('service "slots" is not declared by your plugin') as string,
+      stack: expect.any(String) as string,
+    })
+    expect(bench.guardReported).toEqual([])
+  })
+
+  it('sends a render crash of a component it seated to the given outlet, not the environment\'s', async () => {
+    const bench = await boot()
+    const reportRenderFailure = vi.fn()
+    const overrides: DynamicCordisLoadOverrides = {
+      invoke: vi.fn(() => Promise.resolve(null)),
+      reportGuardFailure: vi.fn(),
+      reportRenderFailure,
+    }
+    await bench.runner.load(half({ code: CONTRIBUTOR }), overrides)
+    const [entry] = bench.slots.entries('root')
+    bench.crash('root', entry, new Error('boom'))
+    expect(reportRenderFailure).toHaveBeenCalledWith({
+      slot: 'root',
+      message: expect.stringContaining('boom') as string,
+      stack: expect.any(String) as string,
+      abdicated: true,
+    })
+    expect(bench.reported).toEqual([])
+  })
+})
+
+describe('unload', () => {
+  it('tears down one activation and resolves', async () => {
+    const bench = await boot()
+    await bench.runner.load(half())
+    await bench.runner.unload(PLUGIN, RUN)
+    expect(bench.removed).toEqual(['entry-1'])
+    expect(bench.runner.isLoaded(PLUGIN)).toBe(false)
+  })
+
+  it('ignores a different runId than the one currently loaded', async () => {
+    const bench = await boot()
+    await bench.runner.load(half({ pluginRunId: runId(3) }))
+    await bench.runner.unload(PLUGIN, runId(2))
+    expect(bench.runner.isLoaded(PLUGIN)).toBe(true)
+    expect(bench.removed).toEqual([])
+  })
+
+  it('ignores a package this page never loaded', async () => {
+    const bench = await boot()
+    await bench.runner.unload(PLUGIN, RUN)
+    expect(bench.removed).toEqual([])
+  })
+
+  it('is what retract delegates to', async () => {
+    const bench = await boot()
+    await bench.runner.load(half())
+    const spy = vi.spyOn(bench.runner, 'unload')
+    bench.runner.retract(PLUGIN, RUN)
+    expect(spy).toHaveBeenCalledWith(PLUGIN, RUN)
+    await bench.settle()
+    expect(bench.runner.isLoaded(PLUGIN)).toBe(false)
   })
 })

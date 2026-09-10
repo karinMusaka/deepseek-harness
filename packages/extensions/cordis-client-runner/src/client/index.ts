@@ -12,15 +12,16 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  ApprovalRequestId, CordisDynamicPluginId, DynamicCordisInvokeResult, JsonValue,
-  DynamicCordisInventoryRow,
+  ApprovalRequestId, CordisDynamicPackageId, CordisDynamicPluginId, CordisDynamicPluginRunId,
+  DynamicCordisInvokeResult, JsonValue, DynamicCordisInventoryRow,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ClientModuleSystem } from '@deepseek-ai/dsh-client-modules/client'
 import type { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 // The Client Remote assembly is the one place the two planes meet: it mounts the
 // `dynamicCordisRunner` namespace and re-exports its payload vocabulary, so this
 // package names what it sends without importing a Host package.
-import type { DynamicCordisLivePackage } from './runtime.ts'
+import type { DynamicCordisLivePackage, DynamicCordisLoadOverrides, DynamicCordisLoadResult } from './runtime.ts'
 import { DynamicCordisPackageRunner } from './runtime.ts'
 import { CordisRunOrchestrator } from './orchestrator.ts'
 import { ClientCordisInspectRegistry, provideClientCordisInspect } from './inspect-registry.ts'
@@ -39,6 +40,7 @@ export type {
   CordisRunOrchestratorEnv, CordisRunRequest, CordisUserRunRequest,
 } from './orchestrator.ts'
 export { DynamicCordisPackageRunner } from './runtime.ts'
+export type { DynamicCordisLoadOverrides } from './runtime.ts'
 export type {
   CordisObservable, DynamicCordisClientHalf, DynamicCordisLivePackage, DynamicCordisLoadErrorCause,
   DynamicCordisLoadResult, DynamicCordisRenderFailure, DynamicCordisRunnerEnv,
@@ -120,7 +122,35 @@ export interface CordisRunnerFace {
    * @returns true while a load is live here.
    */
   isLoaded(pluginId: CordisDynamicPluginId): boolean
+  /**
+   * Load a browser half that no host-runner definition owns: a static package
+   * whose source another plugin fetched and whose `host.call` it routes itself.
+   * Evaluation, guarding, module seating, and teardown are the runner's; the
+   * caller supplies the routing and receives the failure reports.
+   * @param request - the package identity, label, source, and its routing/reporting outlets.
+   * @returns the load outcome, the same shape a host-defined load answers.
+   */
+  loadStatic(request: CordisStaticLoadRequest): Promise<DynamicCordisLoadResult>
+  /**
+   * Unload a package loaded through `loadStatic`.
+   * @param pluginId - the identity the load used.
+   * @returns after the teardown converged.
+   */
+  unloadStatic(pluginId: CordisDynamicPluginId): Promise<void>
 }
+
+/** One static browser half to load, with the outlets the runner would otherwise get from the host runner. */
+export interface CordisStaticLoadRequest extends DynamicCordisLoadOverrides {
+  /** Page-unique identity; also the module id suffix. */
+  pluginId: CordisDynamicPluginId
+  /** Plugin name. */
+  name: string
+  /** Browser-half source: an async function body returning a plugin. */
+  code: string
+}
+
+/** The one activation identity every static load carries; static halves have no host-runner run. */
+const STATIC_RUN = 'static' as CordisDynamicPluginRunId
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -286,6 +316,19 @@ export function apply(ctx: Context): void {
     subscribe: fn => runner.subscribe(fn),
     getSnapshot: () => runner.getSnapshot(),
     isLoaded: id => runner.isLoaded(id),
+    loadStatic: request => runner.load({
+      pluginId: request.pluginId,
+      packageId: 'static' as CordisDynamicPackageId,
+      pluginRunId: STATIC_RUN,
+      agentId: 'static' as SessionId,
+      name: request.name,
+      code: request.code,
+    }, {
+      invoke: (method, args) => request.invoke(method, args),
+      reportGuardFailure: (failure) => { request.reportGuardFailure(failure) },
+      reportRenderFailure: (failure) => { request.reportRenderFailure(failure) },
+    }),
+    unloadStatic: pluginId => runner.unload(pluginId, STATIC_RUN),
   }
   ctx.provide('dynamicCordisRunner', face)
   ctx.effect(() => () => { void runner.dispose() }, 'cordis-client-runner: dynamic package runner')

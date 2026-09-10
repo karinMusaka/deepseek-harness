@@ -10,3 +10,5 @@ agent 修改自身运行时：检查已加载的插件与服务接口、定义�
 | [`cordis-host-runner/`](cordis-host-runner/README.md) | 定义注册表、host 半的 `node:vm` 沙箱，以及 request-run 往返 | 提供 `ctx.dynamicCordisRunner` |
 | [`cordis-client-runner/`](cordis-client-runner/README.md) | 双半包的浏览器半：把定义求值成活的浏览器插件，并应答运行请求 | client 面；提供浏览器侧 `ctx.dynamicCordisRunner` |
 | [`ui-cordis/`](ui-cordis/README.md) | 浏览器面：操作全部定义的全局面板，与只读的 define 卡片 | client 面；注册 slot |
+| [`cordis-static-packages/`](cordis-static-packages/README.md) | 启动时加载磁盘上的双半包：与已定义的包共用同一沙箱与守卫，以配置代替逐次运行审批 | 提供 `ctx.staticCordisPackages` |
+| [`cordis-static-packages-client/`](cordis-static-packages-client/README.md) | 静态包的浏览器半：页面加载时取回每个已配置源，并经动态包运行器就位 | client 面；经 `ctx.dynamicCordisRunner` 加载 |

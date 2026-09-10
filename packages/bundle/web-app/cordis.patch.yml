@@ -102,6 +102,12 @@
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'
 
+    # Boot-time loader for dual-half packages kept on disk. The row ships empty;
+    # a deployment lists its packages by overriding this row's config in its
+    # own cordis.patch.yml (the id is the address).
+    - id: cordis-static-packages
+      name: '@deepseek-ai/dsh-cordis-static-packages'
+
     # Ordinary provider for the parsed Web flags. Its plugin-level injection
     # waits for cmdlineArgs; no launcher metadata or special row kind is needed.
     - id: web-startup
@@ -170,6 +176,9 @@
 
     - id: cordis-client-runner
       name: '@deepseek-ai/dsh-cordis-client-runner'
+
+    - id: cordis-static-packages-client
+      name: '@deepseek-ai/dsh-cordis-static-packages-client'
 
     - id: ui-theme
       name: '@deepseek-ai/dsh-client-ui-theme'

@@ -41,7 +41,7 @@ One field is all there is: a run request waits for a person, so the round trip h
 
 ## Export shape
 
-Service package: default-exports `DynamicCordisRunnerService` (service key `dynamicCordisRunner`), with `./types` carrying the payload shapes the `dynamicCordisRunner` remote namespace and its consumers share. The `define` / `undefine` shapes stay inside the package, because they never cross the wire.
+Service package: default-exports `DynamicCordisRunnerService` (service key `dynamicCordisRunner`), with `./types` carrying the payload shapes the `dynamicCordisRunner` remote namespace and its consumers share. The `define` / `undefine` shapes stay inside the package, because they never cross the wire. `createSandbox`, `evaluateHostCode`, `startHostHalf`, `isPlugin`, and `normalizeHandler` are also exported, so [`@deepseek-ai/dsh-cordis-static-packages`](../cordis-static-packages/README.md) evaluates a configured host half under the exact same sandbox, timeout, and registration guard as one this service runs for a `cordis_define`d package.
 
 ## Model Experience
 

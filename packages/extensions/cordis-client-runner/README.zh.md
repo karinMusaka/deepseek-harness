@@ -29,6 +29,7 @@
 - `lastRunError` —— 本页自己那次尝试为何失败，按定义索引。它比活动活得更久：host 只拆失败请求自己启动的那半，所以一个页面可能看着 host 报告为「在跑」的定义，而自己什么都没装上。
 - `approve(requestId)` / `decline(requestId)` / `startUserRun({ agentId, id, hasClientHalf })` —— 两条入口。三者都幂等（按 requestId，用户自发的 run 按定义 id），所以连点两次不会起两次 run。`hasClientHalf` 是必填：纯 host 定义没有源码可取，所以由调用方从它正在操作的注册表行里把这个事实说出来，而不是让编排器从一次失败的取码里反推。可回答的请求必然带浏览器半 —— 纯 host 定义是 host 自己起的，它不会去问页面。
 - `subscribe()` / `getSnapshot()` / `isLoaded(id)` —— 这一页装了什么。`isLoaded` 是页面本地的事实，永远不等于 host 说的「在跑」。
+- `loadStatic(request)` / `unloadStatic(pluginId)` —— 装载或卸载一个不属于任何 host-runner 定义的浏览器半：[`@deepseek-ai/dsh-cordis-static-packages-client`](../cordis-static-packages-client/README.md) 提供身份、标签、源码，以及它自己的 `invoke`／`reportGuardFailure`／`reportRenderFailure` 出口（`DynamicCordisLoadOverrides`），取代环境默认的 host-runner 接线，因此一个静态包的路由与失败上报永远不会走到 host runner 自己那套按 Agent 限定的路径。求值、guard、模块就位与拆卸都与一次 host 定义的装载共用同一台引擎；`unloadStatic` 是 host-runner 定义收到的那条 `retract` 事件的可等待对应物，因为静态包没有 host 侧的 stop 可以播报出这条事件。
 
 ## 模型体验
 

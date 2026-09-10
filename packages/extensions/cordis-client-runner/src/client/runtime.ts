@@ -71,6 +71,22 @@ export interface DynamicCordisClientHalf {
 }
 
 /**
+ * Per-load replacements for the wiring a host-defined package gets from the
+ * runner environment. A browser half that belongs to no host-runner definition
+ * (a static package read from disk) routes its `host.call` and its failure
+ * reports elsewhere, while evaluation, guarding, module seating, and teardown
+ * stay exactly the runner's.
+ */
+export interface DynamicCordisLoadOverrides {
+  /** Route this package's `host.call` instead of the environment's `invoke`. */
+  invoke(method: string, args: unknown): Promise<unknown>
+  /** Receive this package's post-activation guard rejections instead of the owning Agent. */
+  reportGuardFailure(failure: CordisErrorDetails): void
+  /** Receive this package's render-time crashes instead of the owning Agent. */
+  reportRenderFailure(failure: DynamicCordisRenderFailure): void
+}
+
+/**
  * One render-time crash of a dynamic package's slot entry, as this page reports
  * it. Post-settle diagnosis only: the run it belongs to was answered long before
  * (a package that crashes while rendering loaded successfully), so this never
@@ -203,6 +219,8 @@ export class DynamicCordisPackageRunner {
     pluginId: CordisDynamicPluginId
     pluginRunId: CordisDynamicPluginRunId
     agentId: SessionId
+    /** Overridden render-crash outlet; absent for host-defined packages. */
+    report?: (failure: DynamicCordisRenderFailure) => void
   }>()
   /** This page's last render crash per package: what a run surface shows on the row. */
   private readonly failures = new Map<CordisDynamicPluginId, DynamicCordisRenderFailure>()
@@ -228,7 +246,8 @@ export class DynamicCordisPackageRunner {
       // One observation, two outlets with different owners and lifetimes: the host
       // keeps the last crash ACROSS pages for the model, this map is what THIS page
       // currently shows. Neither is derived from the other.
-      env.reportRenderFailure(owner.agentId, owner.pluginId, owner.pluginRunId, failure)
+      if (owner.report === undefined) env.reportRenderFailure(owner.agentId, owner.pluginId, owner.pluginRunId, failure)
+      else owner.report(failure)
       this.failures.set(owner.pluginId, failure)
       this.notify()
     })
@@ -283,9 +302,10 @@ export class DynamicCordisPackageRunner {
   /**
    * Load one browser half into this page and answer what happened.
    * @param half - source for one exact Host activation.
+   * @param overrides - replacement `host.call` routing and failure outlets for a half no host-runner definition owns.
    * @returns the outcome the run orchestration reports to the host.
    */
-  load(half: DynamicCordisClientHalf): Promise<DynamicCordisLoadResult> {
+  load(half: DynamicCordisClientHalf, overrides?: DynamicCordisLoadOverrides): Promise<DynamicCordisLoadResult> {
     return this.enqueue(half.pluginId, async () => {
       const current = this.live.get(half.pluginId)
       if (current !== undefined) {
@@ -294,7 +314,7 @@ export class DynamicCordisPackageRunner {
         if (current.pkg.pluginRunId === half.pluginRunId) return settled(current)
         await this.teardown(current.pkg.pluginId, current.entryId, current.styles)
       }
-      const result = await this.mount(half)
+      const result = await this.mount(half, overrides)
       this.notify()
       return result
     })
@@ -307,7 +327,17 @@ export class DynamicCordisPackageRunner {
    * @param pluginRunId - exact activation being retracted; a newer run survives.
    */
   retract(pluginId: CordisDynamicPluginId, pluginRunId: CordisDynamicPluginRunId): void {
-    void this.enqueue(pluginId, async () => {
+    void this.unload(pluginId, pluginRunId)
+  }
+
+  /**
+   * Unload one activation and wait for the teardown to converge (the static
+   * loader's disposal path; `retract` is its fire-and-forget event twin).
+   * @param pluginId - stable Plugin identity.
+   * @param pluginRunId - exact activation being unloaded; a newer run survives.
+   */
+  unload(pluginId: CordisDynamicPluginId, pluginRunId: CordisDynamicPluginRunId): Promise<void> {
+    return this.enqueue(pluginId, async () => {
       const current = this.live.get(pluginId)
       if (current === undefined || current.pkg.pluginRunId !== pluginRunId) return
       await this.teardown(pluginId, current.entryId, current.styles)
@@ -340,13 +370,15 @@ export class DynamicCordisPackageRunner {
     return next
   }
 
-  private async mount(half: DynamicCordisClientHalf): Promise<DynamicCordisLoadResult> {
+  private async mount(half: DynamicCordisClientHalf, overrides?: DynamicCordisLoadOverrides): Promise<DynamicCordisLoadResult> {
     const styles = new DynamicCordisStyles(half.pluginId)
     const ledger: DynamicCordisSlotLedgerRow[] = []
     let plugin: DynamicCordisEvaluatedPlugin | ((ctx: unknown) => unknown)
     try {
       plugin = await evaluateClientHalf(half.pluginId, half.code, {
-        invoke: (method, args) => this.env.invoke(half.pluginId, half.pluginRunId, method, args),
+        invoke: overrides === undefined
+          ? (method, args) => this.env.invoke(half.pluginId, half.pluginRunId, method, args)
+          : (method, args) => overrides.invoke(method, args),
         noteError: (message) => {
           // A loaded package's own console.error: a page-local diagnostic with
           // no wire carrier (the run round trip settled long before).
@@ -364,7 +396,7 @@ export class DynamicCordisPackageRunner {
       pluginRunId: half.pluginRunId,
       name: half.name,
     }
-    const surface = this.guardedSurface(pkg, half.agentId, plugin, ledger)
+    const surface = this.guardedSurface(pkg, half.agentId, plugin, ledger, overrides)
     const moduleId = moduleIdOf(half.pluginId)
     // Invalidate-then-register keeps re-loading legal: the module table throws
     // loudly on a duplicate factory registration.
@@ -411,10 +443,16 @@ export class DynamicCordisPackageRunner {
     agentId: SessionId,
     plugin: DynamicCordisEvaluatedPlugin | ((ctx: unknown) => unknown),
     ledger: DynamicCordisSlotLedgerRow[],
+    overrides?: DynamicCordisLoadOverrides,
   ): DynamicCordisEvaluatedPlugin {
     const claim = (component: unknown): void => {
       if (indexable(component)) {
-        this.owners.set(component, { pluginId: pkg.pluginId, pluginRunId: pkg.pluginRunId, agentId })
+        this.owners.set(component, {
+          pluginId: pkg.pluginId,
+          pluginRunId: pkg.pluginRunId,
+          agentId,
+          ...overrides === undefined ? {} : { report: (failure: DynamicCordisRenderFailure) => { overrides.reportRenderFailure(failure) } },
+        })
       }
     }
     const guarded = (ctx: unknown): Context => dynamicCordisContext(ctx as Context, {
@@ -423,7 +461,8 @@ export class DynamicCordisPackageRunner {
       claim,
       allocatePriority: () => --this.nextPriority,
       reportFailure: (error) => {
-        this.env.reportGuardFailure(agentId, pkg.pluginId, pkg.pluginRunId, errorDetails(error))
+        if (overrides === undefined) this.env.reportGuardFailure(agentId, pkg.pluginId, pkg.pluginRunId, errorDetails(error))
+        else overrides.reportGuardFailure(errorDetails(error))
       },
     })
     if (typeof plugin === 'function') {

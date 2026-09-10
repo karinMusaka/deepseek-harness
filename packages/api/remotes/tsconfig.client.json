@@ -28,6 +28,9 @@
       "path": "../../extensions/cordis-host-runner"
     },
     {
+      "path": "../../extensions/cordis-static-packages"
+    },
+    {
       "path": "../../goal/goal"
     },
     {

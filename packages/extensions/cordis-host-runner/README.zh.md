@@ -41,7 +41,7 @@ vm 沙箱隔离全局变量，但不是安全边界：Node 全局变量不存在
 
 ## 导出形状
 
-服务包：默认导出 `DynamicCordisRunnerService`（服务键 `dynamicCordisRunner`），`./types` 则承载 `dynamicCordisRunner` remote namespace 与其消费方共享的载荷形状。`define`／`undefine` 的形状留在包内部，因为它们从不跨 wire。
+服务包：默认导出 `DynamicCordisRunnerService`（服务键 `dynamicCordisRunner`），`./types` 则承载 `dynamicCordisRunner` remote namespace 与其消费方共享的载荷形状。`define`／`undefine` 的形状留在包内部，因为它们从不跨 wire。`createSandbox`、`evaluateHostCode`、`startHostHalf`、`isPlugin` 与 `normalizeHandler` 也一并导出，因此 [`@deepseek-ai/dsh-cordis-static-packages`](../cordis-static-packages/README.md) 求值一个已配置的 host 半时，用的是与本服务为 `cordis_define` 出的包所用的完全相同的沙箱、超时与注册 guard。
 
 ## 模型体验
 

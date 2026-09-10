@@ -40,6 +40,11 @@ export type {
 export { CordisInspectRegistryService } from './inspect-registry.ts'
 export type { HostCordisInspectProviderRegistration } from './inspect-registry.ts'
 export { HOST_BUILTIN_INSPECTION } from './sandbox.ts'
+// Host-half evaluation primitives, shared with the static-package loader so a
+// package read from disk runs under the same sandbox and guard as a defined one.
+export { createSandbox, evaluateHostCode } from './sandbox.ts'
+export { startHostHalf } from './lifecycle.ts'
+export { isPlugin, normalizeHandler } from './guard.ts'
 
 /**
  * Brand a Host-minted Plugin ID.

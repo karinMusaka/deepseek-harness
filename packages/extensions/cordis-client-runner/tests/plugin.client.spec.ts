@@ -209,6 +209,64 @@ describe('browser half', () => {
     expect(bench.ctx.dynamicCordisRunner.isLoaded(PLUGIN)).toBe(false)
   })
 
+  it('loadStatic seats a half whose host.call reaches the given invoke, not the namespace', async () => {
+    const bench = await boot()
+    const invoke = vi.fn(() => Promise.resolve('overridden'))
+    const result = await bench.ctx.dynamicCordisRunner.loadStatic({
+      pluginId: PLUGIN,
+      name: 'demo',
+      code: 'return { apply: () => { host.call("ping", 1) } }',
+      invoke,
+      reportGuardFailure: () => {},
+      reportRenderFailure: () => {},
+    })
+    expect(result.ok).toBe(true)
+    expect(invoke).toHaveBeenCalledWith('ping', 1)
+    // The dynamicCordisRunner namespace's own invoke, wired for host-runner
+    // definitions, must never see a statically loaded half's calls.
+    expect(bench.invoked).toEqual([])
+  })
+
+  it('routes a loadStatic half\'s post-activation guard rejection and render crash to the given outlets', async () => {
+    const bench = await boot()
+    const reportGuardFailure = vi.fn()
+    const reportRenderFailure = vi.fn()
+    await bench.ctx.dynamicCordisRunner.loadStatic({
+      pluginId: PLUGIN,
+      name: 'demo',
+      code: `return {
+        inject: ['slots'],
+        apply(ctx) {
+          ctx.slots.register({ name: 'root' }, () => null)
+          ctx.on('t/ping', () => { ctx.foo })
+        },
+      }`,
+      invoke: () => Promise.resolve(null),
+      reportGuardFailure,
+      reportRenderFailure,
+    })
+    expect(() => { (bench.ctx.emit as (type: string) => void)('t/ping') }).toThrow()
+    expect(reportGuardFailure).toHaveBeenCalled()
+    const [entry] = bench.ctx.slots.entries('root')
+    bench.crash('root', entry, true, new Error('boom'))
+    expect(reportRenderFailure).toHaveBeenCalled()
+  })
+
+  it('unloadStatic removes what loadStatic loaded', async () => {
+    const bench = await boot()
+    await bench.ctx.dynamicCordisRunner.loadStatic({
+      pluginId: PLUGIN,
+      name: 'demo',
+      code: 'return { apply() {} }',
+      invoke: () => Promise.resolve(null),
+      reportGuardFailure: () => {},
+      reportRenderFailure: () => {},
+    })
+    expect(bench.ctx.dynamicCordisRunner.isLoaded(PLUGIN)).toBe(true)
+    await bench.ctx.dynamicCordisRunner.unloadStatic(PLUGIN)
+    expect(bench.ctx.dynamicCordisRunner.isLoaded(PLUGIN)).toBe(false)
+  })
+
   it('unloads on a forwarded withdrawal event', async () => {
     const bench = await boot()
     await bench.ctx.dynamicCordisRunner.startUserRun(USER_RUN)
