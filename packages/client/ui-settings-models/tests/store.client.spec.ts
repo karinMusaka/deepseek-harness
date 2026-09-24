@@ -1,7 +1,7 @@
 /** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
-import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
-import { messageOf, ModelsSettingsStore } from '../src/client/store.ts'
+import type { ModelProviderGroup, RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+import { hiddenModelsOf, messageOf, ModelsSettingsStore } from '../src/client/store.ts'
 
 let nextRpc = 0
 function ok<T>(value: T): RpcResponse<T> {
@@ -43,12 +43,13 @@ function api(overrides: {
   providers?: () => Promise<RpcResponse<{ providers: typeof DIRECTORY }>>
   describeSettings?: () => Promise<RpcResponse<{ writable: boolean; namespaces: typeof NAMESPACES }>>
   describeCredentials?: (refs: string[]) => Promise<RpcResponse<{ credentials: Record<string, unknown> }>>
+  models?: () => Promise<RpcResponse<{ groups: ModelProviderGroup[]; failures: { id: string; name: string; message: string }[] }>>
 } = {}) {
   const seenRefs: string[][] = []
   const face = {
     llm: {
       providers: overrides.providers ?? (() => Promise.resolve(ok({ providers: DIRECTORY }))),
-      models: () => Promise.resolve(ok({ groups: [], failures: [] })),
+      models: overrides.models ?? (() => Promise.resolve(ok({ groups: [], failures: [] }))),
     },
     settings: {
       describe: overrides.describeSettings ?? (() => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: NAMESPACES }))),
@@ -163,6 +164,83 @@ describe('ModelsSettingsStore', () => {
     release?.()
     await Promise.all([first, second])
     expect(store.store.getSnapshot().status).toBe('ready')
+  })
+})
+
+describe('ModelsSettingsStore catalog', () => {
+  const GROUPS: ModelProviderGroup[] = [{
+    id: 'deepseek-official',
+    name: 'DeepSeek',
+    models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
+  }]
+
+  it('loads the unfiltered catalog for the visibility section', async () => {
+    const { face } = api({ models: () => Promise.resolve(ok({ groups: GROUPS, failures: [] })) })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    const state = store.store.getSnapshot()
+    expect(state.catalogGroups).toEqual(GROUPS)
+    expect(state.catalogFailures).toEqual([])
+    expect(state.catalogError).toBeNull()
+  })
+
+  it('keeps the provider rows usable when the catalog load rejects a business error', async () => {
+    const { face } = api({ models: () => Promise.resolve(fail('llm registry unavailable')) })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    const state = store.store.getSnapshot()
+    expect(state.status).toBe('ready')
+    expect(state.catalogGroups).toEqual([])
+    expect(state.catalogError).toBe('llm registry unavailable')
+    expect(state.rows).toHaveLength(4)
+  })
+
+  it('keeps the provider rows usable when the catalog transport rejects', async () => {
+    const { face } = api({ models: () => Promise.reject(new Error('catalog transport down')) })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    const state = store.store.getSnapshot()
+    expect(state.status).toBe('ready')
+    expect(state.catalogError).toBe('catalog transport down')
+    expect(state.rows).toHaveLength(4)
+  })
+
+  it('stringifies a non-Error catalog transport rejection', async () => {
+    const { face } = api({
+      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- the non-Error rejection is the scenario
+      models: () => Promise.reject('catalog refusal'),
+    })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    expect(store.store.getSnapshot().catalogError).toBe('catalog refusal')
+  })
+})
+
+describe('hiddenModelsOf', () => {
+  it('reads the hidden ids for a provider under the visibility namespace', () => {
+    const namespaces = new Map([
+      ['ui-model-selection', {
+        ns: 'ui-model-selection', schema: {},
+        value: { hiddenModels: { 'deepseek-official': ['deepseek-v4-pro'] } },
+        applies: 'live' as const, secrets: [], revision: 2,
+      }],
+    ]) as never
+    expect(hiddenModelsOf(namespaces, 'deepseek-official')).toEqual(['deepseek-v4-pro'])
+    expect(hiddenModelsOf(namespaces, 'other')).toEqual([])
+  })
+
+  it('returns nothing hidden when the namespace is absent (fail open)', () => {
+    expect(hiddenModelsOf(new Map(), 'deepseek-official')).toEqual([])
+  })
+
+  it('ignores a non-array or non-string-entry value at the field', () => {
+    const namespaces = new Map([
+      ['ui-model-selection', {
+        ns: 'ui-model-selection', schema: {}, value: { hiddenModels: { p: 'not-an-array' } },
+        applies: 'live' as const, secrets: [], revision: 0,
+      }],
+    ]) as never
+    expect(hiddenModelsOf(namespaces, 'p')).toEqual([])
   })
 })
 

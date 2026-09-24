@@ -21,6 +21,7 @@ import { CustomProviderCard } from './CustomProviderCard.tsx'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
 import type { ModelsSettingsState, ModelsSettingsStore, ProviderRow } from './store.ts'
 import { ProviderEditor, type ProviderEditorProps } from './ProviderEditor.tsx'
+import { ModelVisibilitySection } from './ModelVisibilitySection.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -486,6 +487,12 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
               </div>
             )}
       </div>
+      <ModelVisibilitySection
+        state={state}
+        api={api}
+        t={t}
+        reload={() => { void controller.load() }}
+      />
       <Modal
         open={deleteTarget !== undefined}
         onClose={closeDelete}

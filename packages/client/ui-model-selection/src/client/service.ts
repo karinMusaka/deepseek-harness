@@ -15,7 +15,11 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionRuntime } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionRuntime, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+// Type-only: pulls the ctx.settingsScope Context merge (cross-plugin
+// collaboration goes through the service, never a value import).
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { MODEL_VISIBILITY_SETTINGS_NAMESPACE, type ModelVisibilitySettings } from '../model-visibility-settings.ts'
 import { ModelDirectory } from './directory.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -32,12 +36,19 @@ interface LiveState {
 
 /** The `ctx.modelDirectories` session model-selection service. */
 export class ModelDirectoryResolver extends Service {
-  static inject = ['connection', 'sessions', 'remote']
+  static inject = ['connection', 'sessions', 'remote', 'settingsScope']
 
   private readonly live: LiveState = { directories: new Map() }
 
   /** Localized composer-block copy; this plugin owns the string it raises. */
   private readonly blockReason: () => string
+
+  /**
+   * Shared (per-connection, not per-session) hidden-model preference scope —
+   * one binding for every directory this resolver hands out, since the
+   * preference is a user setting rather than a session fact.
+   */
+  private readonly hidden: SettingsScope<ModelVisibilitySettings>
 
   /**
    * @param ctx - owning root context (the service registers itself as `models`).
@@ -46,6 +57,9 @@ export class ModelDirectoryResolver extends Service {
   constructor(ctx: Context, config: { blockReason: () => string }) {
     super(ctx, 'modelDirectories')
     this.blockReason = config.blockReason
+    this.hidden = ctx.settingsScope.bind<ModelVisibilitySettings>({
+      namespace: MODEL_VISIBILITY_SETTINGS_NAMESPACE,
+    })
     ctx.on('connection/reset', () => {
       for (const directory of this.live.directories.values()) directory.resetConnected()
     })
@@ -78,6 +92,7 @@ export class ModelDirectoryResolver extends Service {
       connection.api.sessions,
       sessionId,
       () => sessions.subagentAddress(sessionId) === undefined,
+      this.hidden,
     )
     live.directories.set(sessionId, directory)
     // The composer cannot read this plugin (the dependency runs one way), so

@@ -36,6 +36,12 @@
       "path": "../ui-slots"
     },
     {
+      "path": "../ui-settings"
+    },
+    {
+      "path": "../../settings/settings"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     },
     {

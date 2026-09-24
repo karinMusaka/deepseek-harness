@@ -49,6 +49,9 @@ function state(overrides: Partial<ModelsSettingsState> = {}): ModelsSettingsStat
     writable: true,
     rows: [row()],
     namespaces: new Map(),
+    catalogGroups: [],
+    catalogFailures: [],
+    catalogError: null,
     ...overrides,
   }
 }

@@ -12,11 +12,13 @@ Host 报告的 `ModelSelection` 是唯一的选择事实，其中包含提供方
 
 每一份常驻目录都会直接在转发的 owner 事件 `llm/adapters-updated` 与 `settings/document-updated` 上重拉。因此提供方拓扑、提供方目录与默认选择都能收敛，Host 与 client runtime 无需再派生一个单独的模型变更别名。
 
-`/client` 导出面为插件本体（`apply`/`inject`）、`ModelDirectoryResolver`、`ModelDirectory` 及其状态形状、slot 注入面类型。
+`ModelDirectory` 还会用持久化的「按模型选择器可见性」偏好过滤 `groups`——即本包 node 侧注册的 `ui-model-selection` settings namespace（字段 `hiddenModels`，一个提供方路由 id 到隐藏模型 id 列表的字典；唯一的写入方是 `@deepseek-ai/dsh-client-ui-settings-models` 的 Models 页面）。过滤发生在客户端，且是唯一的执行点：它从不触及 `session.models` 或 `session.selectModel`，因此一个被隐藏但仍是当前选择的模型照常可路由，对它调用 `session.selectModel` 也照常可用。一个隐藏模型会从其分组中移除，除非它恰好是该会话当前选择的提供方／模型对——触发器绝不能因为隐藏偏好而回退到 `Select model`；没有可见模型的分组会被整体丢弃。目录会保留上一次成功加载的原始（未过滤）catalog，并在每次新加载／选择之后，以及共享的隐藏集合 scope 发生变化时重新推导 `groups`，因此在同一客户端别处切换该偏好会更新每个已打开的选择器，而无需一次网络往返。读取该偏好走的是 Appearance 行所用的同一条 `ctx.settingsScope` 传输通道；只要其快照还不是一个就绪的持久化分节——加载中、不可用，或远程浏览器的内存模式——过滤就是空操作，因此这项偏好永远不能把选择器清空。
+
+`/client` 导出面为插件本体（`apply`/`inject`）、`ModelDirectoryResolver`、`ModelDirectory` 及其状态形状、slot 注入面类型。node 侧另外导出它所注册 schema 用到的 `MODEL_VISIBILITY_SETTINGS_NAMESPACE`、`HIDDEN_MODELS_FIELD` 及 `ModelVisibilitySettings` 类型。
 
 ## 模型体验
 
-间接影响。两个入口都通过仅供普通会话使用的 `session.selectModel` RPC 提交完整的 `ModelSelection`；Host 会在下一次提示词组装边界对其进行快照，因此后续请求采用所选提供方、模型与推理强度，而运行中的步骤保留已组装选择。只有当现有请求头记录一次实际采用该选择的请求后，选择才会持久化；菜单交互不会添加提示词内容。
+间接影响。两个入口都通过仅供普通会话使用的 `session.selectModel` RPC 提交完整的 `ModelSelection`；Host 会在下一次提示词组装边界对其进行快照，因此后续请求采用所选提供方、模型与推理强度，而运行中的步骤保留已组装选择。只有当现有请求头记录一次实际采用该选择的请求后，选择才会持久化；菜单交互不会添加提示词内容。隐藏模型偏好只改变两个入口的列表内容——它从不触及选择 RPC、已组装的请求，也不影响一个已经是当前选择的模型的可路由性。
 
 #### KV Cache 影响
 
@@ -27,3 +29,5 @@ Host 报告的 `ModelSelection` 是唯一的选择事实，其中包含提供方
 - **无创建期或已寻址 subagent 选择**——两个入口都要求既有普通会话的 agent；没有可纳入会话创建的草稿阶段模型选择，subagent 继续执行也有意不公开独立的模型选择约定。
 - **目录名仅供呈现**——选择与持久化使用提供方／模型／推理强度 id；目录查询或确切模型元数据查询失败的提供方以不可选失败行列出，重新加载前保持原样。
 - **不能任意输入推理强度**——composer 仅提供确切模型由适配器公布的推理强度；适配器没有推理元数据时不显示 Effort 行。
+- **隐藏模型偏好按用户设置生效，而非按会话**——一份 `hiddenModels` 字典适用于本客户端打开的每一个会话；没有按会话或按工作区的覆盖项。
+- **已是会话当前选择的隐藏模型仍可选、仍可路由**——这项豁免是刻意的（触发器绝不能因为隐藏偏好而回退到 `Select model`），因此想让某个模型在某个会话中彻底消失的用户还需要把该会话切换到别的模型；单靠隐藏并不会撤销既有选择。

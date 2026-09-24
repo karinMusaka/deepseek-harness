@@ -7,7 +7,8 @@
  */
 
 import type {
-  ConfigurableProviderView, CredentialView, IApiClient, SettingsNamespaceView,
+  ConfigurableProviderView, CredentialView, IApiClient, ModelCatalogFailure, ModelProviderGroup,
+  SettingsNamespaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -18,6 +19,39 @@ import { getPath, hasPath, nodeAtPath, rehydrateSchema } from '@deepseek-ai/dsh-
  * names one that cannot collide with a configured route.
  */
 const PROBE_ROUTE = '\u0000probe'
+
+/**
+ * Namespace and field `@deepseek-ai/dsh-client-ui-model-selection`'s host
+ * half registers and its browser half (`ModelDirectory`) filters the picker
+ * catalog against. Mirrored here rather than imported — cross-package value
+ * imports between client plugin packages are forbidden
+ * (`packages/client/AGENTS.md`), the same rule this package's `apiKey.ts`
+ * documents for its `normalizeApiKey` twin — so this page keys on the
+ * namespace and field by name, exactly as it already does for the
+ * `llm-deepseek`/`llm-pi-ai` namespaces it does not own either.
+ */
+export const MODEL_VISIBILITY_NS = 'ui-model-selection'
+
+/** Field within {@link MODEL_VISIBILITY_NS} carrying the per-provider hidden model id lists. */
+export const HIDDEN_MODELS_FIELD = 'hiddenModels'
+
+/**
+ * The durable hidden model ids for one provider, as the model-visibility
+ * section currently stores them. Absent namespace or provider means nothing
+ * is hidden for it — the default, unhidden state needs no stored entry.
+ * @param namespaces - every namespace view from the page's last load.
+ * @param provider - provider route id.
+ * @returns the hidden model ids, or an empty list.
+ */
+export function hiddenModelsOf(
+  namespaces: ReadonlyMap<string, SettingsNamespaceView>,
+  provider: string,
+): readonly string[] {
+  const namespace = namespaces.get(MODEL_VISIBILITY_NS)
+  if (namespace === undefined) return []
+  const value = getPath(namespace.value, [HIDDEN_MODELS_FIELD, provider])
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+}
 
 /** One provider row the page renders. */
 export interface ProviderRow {
@@ -46,6 +80,17 @@ export interface ModelsSettingsState {
   rows: readonly ProviderRow[]
   /** Namespace views by ns, for the editor's schema/layers/secrets. */
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
+  /**
+   * The unfiltered Host catalog (`llm.models`) the picker-visibility section
+   * lists every model from — independent of any session's advisory groups,
+   * so a model stays listed here even while a session's own directory hides
+   * it. A load failure here is soft: it narrows only the visibility section.
+   */
+  catalogGroups: readonly ModelProviderGroup[]
+  /** Provider-local catalog failures; successful groups remain usable. */
+  catalogFailures: readonly ModelCatalogFailure[]
+  /** Whole-catalog load failure text; provider rows remain usable. */
+  catalogError: string | null
 }
 
 /**
@@ -100,6 +145,7 @@ export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<ModelsSettingsState> = createSnapshotStore<ModelsSettingsState>({
     status: 'idle', error: null, credentialError: null, writable: false, rows: [], namespaces: new Map(),
+    catalogGroups: [], catalogFailures: [], catalogError: null,
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -172,12 +218,32 @@ export class ModelsSettingsStore {
         credentialError = messageOf(error)
       }
     }
+    // The picker-visibility section's catalog: a soft load, like credentials
+    // above — its own transport or business failure never fails provider
+    // editing, and only narrows the visibility section.
+    let catalogGroups: ModelProviderGroup[] = []
+    let catalogFailures: ModelCatalogFailure[] = []
+    let catalogError: string | null = null
+    try {
+      const response = await this.api.llm.models({})
+      if (response.result.ok) {
+        catalogGroups = response.result.value.groups
+        catalogFailures = response.result.value.failures
+      } else {
+        catalogError = response.result.error.message
+      }
+    } catch (error) {
+      catalogError = messageOf(error)
+    }
     if (generation !== this.generation) return
     this.store.update((s) => {
       s.status = 'ready'
       s.error = null
       s.credentialError = credentialError
       s.writable = writable
+      s.catalogGroups = catalogGroups
+      s.catalogFailures = catalogFailures
+      s.catalogError = catalogError
       s.rows = rows.map(row => ({
         ...row,
         ...row.apiKeyEnv !== undefined && credentials[row.apiKeyEnv] !== undefined

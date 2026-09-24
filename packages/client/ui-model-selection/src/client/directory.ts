@@ -8,8 +8,10 @@
 import type {
   IApiClient, ModelCatalogFailure, ModelProviderGroup, ModelSelection, SessionId, SessionModels,
 } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ModelVisibilitySettings } from '../model-visibility-settings.ts'
+import { filterGroups, type HiddenModels } from './visibility.ts'
 
 /** Directory snapshot both entries render from. */
 export interface ModelDirectoryState {
@@ -23,7 +25,13 @@ export interface ModelDirectoryState {
    * from the groups yet perfectly usable.
    */
   routable: boolean | null
-  /** Successfully loaded provider groups (last good load). */
+  /**
+   * Successfully loaded provider groups (last good load), with the user's
+   * hidden models already removed (`ModelDirectory`'s own filter — the sole
+   * enforcement point) except for the exact current provider/model pair,
+   * which is never hidden. `session.selectModel` itself is unfiltered: a
+   * hidden-but-current model keeps routing normally.
+   */
   groups: readonly ModelProviderGroup[]
   /** Provider-local failures from the last load; usable groups stay usable. */
   failures: readonly ModelCatalogFailure[]
@@ -44,16 +52,43 @@ export class ModelDirectory {
   private generation = 0
   private disposed = false
 
+  /** Raw (unfiltered) groups from the last good load; the filtering input `refilter` recomputes from. */
+  private rawGroups: readonly ModelProviderGroup[] = []
+
+  private readonly unsubscribeHidden: () => void
+
   /**
    * @param sessions - the session wire face (captured from the plugin's root connection).
    * @param sessionId - the owning session.
    * @param available - whether this session may use Agent-bound model RPCs.
+   * @param hidden - the shared (per-connection, not per-session) hidden-model
+   * preference scope. Its own `getSnapshot().status` decides fail-open: not
+   * `ready` (loading, unavailable, or memory-mode) hides nothing.
    */
   constructor(
     private readonly sessions: Pick<IApiClient['sessions'], 'models' | 'selectModel'>,
     private readonly sessionId: SessionId,
     private readonly available: () => boolean,
-  ) {}
+    private readonly hidden: Pick<SettingsScope<ModelVisibilitySettings>, 'getSnapshot' | 'subscribe'>,
+  ) {
+    // A hidden-set change refilters the last good load in place — no network
+    // round trip — so toggling a preference is visible immediately regardless
+    // of how the resolver's own broader `settings/document-updated` reload
+    // happens to race against this scope's independent refresh.
+    this.unsubscribeHidden = hidden.subscribe(() => { this.refilter() })
+  }
+
+  /** The live hidden-model preference, or none while it is not a ready durable section. */
+  private hiddenModels(): HiddenModels {
+    const snapshot = this.hidden.getSnapshot()
+    return snapshot.status === 'ready' ? snapshot.value?.hiddenModels ?? {} : {}
+  }
+
+  /** Recompute `groups` from the last good raw load without touching the network. */
+  private refilter(): void {
+    if (this.disposed) return
+    this.store.update((s) => { s.groups = filterGroups(this.rawGroups, this.hiddenModels(), s.current) })
+  }
 
   /**
    * Refresh the advisory directory (both entries call this on open).
@@ -67,22 +102,27 @@ export class ModelDirectory {
     const { result } = await this.sessions.models({ sessionId: this.sessionId })
     if (this.disposed || generation !== this.generation) {
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
-      return result.value
+      // Superseded by a newer load: this call's raw groups never become the
+      // shared rawGroups, but its own caller still awaits a filtered result.
+      const { current, routable, groups, failures } = result.value
+      return { current, routable, groups: filterGroups(groups, this.hiddenModels(), current), failures }
     }
     if (!result.ok) {
       this.store.update((s) => { s.status = 'error'; s.error = `${result.error.code}: ${result.error.message}` })
       throw new Error(`session.models failed: ${result.error.code}: ${result.error.message}`)
     }
     const { current, routable, groups, failures } = result.value
+    this.rawGroups = groups
+    const shown = filterGroups(groups, this.hiddenModels(), current)
     this.store.update((s) => {
       s.current = current
       s.routable = routable
-      s.groups = groups
+      s.groups = shown
       s.failures = failures
       s.status = 'ready'
       s.error = null
     })
-    return result.value
+    return { current, routable, groups: shown, failures }
   }
 
   /**
@@ -112,10 +152,13 @@ export class ModelDirectory {
       throw new Error(`session.selectModel failed: ${result.error.code}: ${result.error.message}`)
     }
     // The Host validated the route before accepting it, so a selection that
-    // landed is by construction one it can serve.
+    // landed is by construction one it can serve. Groups are re-derived: the
+    // newly current pair is exempted from hiding even if it was hidden, and
+    // the previously current pair becomes hideable again.
     this.store.update((s) => {
       s.current = result.value.selected
       s.routable = true
+      s.groups = filterGroups(this.rawGroups, this.hiddenModels(), result.value.selected)
       s.status = 'ready'
       s.error = null
     })
@@ -129,6 +172,7 @@ export class ModelDirectory {
   resetConnected(): void {
     if (this.disposed) return
     ++this.generation
+    this.rawGroups = []
     this.store.update((s) => {
       s.current = null
       s.routable = null
@@ -144,6 +188,7 @@ export class ModelDirectory {
   /** Scope teardown: late settlements lose write access to the store. */
   dispose(): void {
     this.disposed = true
+    this.unsubscribeHidden()
   }
 
   private assertAvailable(): void {

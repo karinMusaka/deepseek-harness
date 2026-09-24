@@ -11,7 +11,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { createScope } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId, SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
@@ -19,6 +19,32 @@ import type { CommandContribution, SelectOption } from '@deepseek-ai/dsh-client-
 import type { ModelSelectInjected } from '../src/client/slots.ts'
 import { apply, inject } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
+import type { ModelVisibilitySettings } from '../src/model-visibility-settings.ts'
+
+/** A minimal in-memory `ctx.settingsScope` fake: `bind` hands back one shared,
+ * directly mutable snapshot store per test — no wire, no `settings.describe`
+ * round trip — so a test can move it between 'loading'/'ready'/'unavailable'
+ * and observe ModelDirectory react without a real settings provider. */
+function fakeSettingsScope() {
+  let snapshot: SettingsScopeSnapshot<ModelVisibilitySettings> = {
+    status: 'unavailable', value: undefined, base: undefined, user: undefined,
+    revision: undefined, writable: false, mode: 'memory',
+  }
+  const listeners = new Set<() => void>()
+  const scope: SettingsScope<ModelVisibilitySettings> = {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    set: () => Promise.resolve(),
+    unset: () => Promise.resolve(),
+  }
+  return {
+    service: { bind: () => scope },
+    publish: (next: SettingsScopeSnapshot<ModelVisibilitySettings>) => {
+      snapshot = next
+      for (const listener of listeners) listener()
+    },
+  }
+}
 
 const sid = (k: string): SessionId => k as SessionId
 
@@ -105,6 +131,8 @@ async function bench() {
     },
   })
   ctx.provide('locale', new LocaleRuntime(ctx))
+  const hidden = fakeSettingsScope()
+  ctx.provide('settingsScope', hidden.service)
   const scopes = new Map<SessionId, Context>()
   const addressed = new Set<SessionId>()
   ctx.provide('sessions', {
@@ -131,6 +159,11 @@ async function bench() {
     address: (id: SessionId) => { addressed.add(id) },
     setRoutable: (next: boolean) => { routable = next },
     blockOf: (key: string) => blocks.get(sid(key)),
+    publishHidden: (hiddenModels: Record<string, string[]>, revision = 1) => {
+      hidden.publish({
+        status: 'ready', value: { hiddenModels }, base: {}, user: {}, revision, writable: true, mode: 'host',
+      })
+    },
   }
 }
 
@@ -319,5 +352,81 @@ describe('ui-model-selection dual entry', () => {
     b.ctx.emit('connection/reset')
     await Promise.resolve()
     expect(b.calls).toEqual({ models: 0, select: 0 })
+  })
+
+  describe('per-model visibility', () => {
+    it('leaves the catalog unfiltered while the hidden-model preference is unavailable (fail open)', async () => {
+      const b = await bench()
+      b.mint('s1')
+      const options = await b.contribution().ui.options(projection('s1'), new AbortController().signal)
+      expect(options.map((o: SelectOption) => o.label)).toEqual(['DeepSeek-V4-Flash', 'DeepSeek-V4-Pro'])
+    })
+
+    it('removes a hidden model from both the popup and the seat directory', async () => {
+      const b = await bench()
+      b.mint('s1')
+      b.publishHidden({ 'deepseek-official': ['deepseek-v4-pro'] })
+      const face = b.seat().inject!(sid('s1'))
+      const loaded = await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      expect(loaded.groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-flash'])
+      expect(face.directory.getSnapshot().groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-flash'])
+      const options = await b.contribution().ui.options(projection('s1'), new AbortController().signal)
+      expect(options.map((o: SelectOption) => o.label)).toEqual(['DeepSeek-V4-Flash'])
+    })
+
+    it('never hides the exact current provider/model pair, even when listed', async () => {
+      const b = await bench()
+      b.mint('s1')
+      b.publishHidden({ 'deepseek-official': ['deepseek-v4-flash'] })
+      const loaded = await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      // deepseek-v4-flash is the Host current selection in this bench and stays listed.
+      expect(loaded.groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro'])
+    })
+
+    it('drops a group left with no visible models', async () => {
+      const b = await bench()
+      b.mint('s1')
+      b.setHostCurrent({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+      b.publishHidden({ 'deepseek-official': ['deepseek-v4-flash', 'deepseek-v4-pro'] })
+      const loaded = await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      // Both are hidden, but deepseek-v4-pro is current and stays; the group survives.
+      expect(loaded.groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-pro'])
+      b.setHostCurrent({ provider: 'deepseek-official', model: 'unrelated' })
+      const reloaded = await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      expect(reloaded.groups).toEqual([])
+    })
+
+    it('a select() call re-derives groups: the new current is exempt, the old one is hideable again', async () => {
+      const b = await bench()
+      b.mint('s1')
+      b.publishHidden({})
+      const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+      await directory.load()
+      await directory.select({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+      b.publishHidden({ 'deepseek-official': ['deepseek-v4-flash'] })
+      expect(directory.store.getSnapshot().groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-pro'])
+    })
+
+    it('refilters on a hidden-set change without a network round trip', async () => {
+      const b = await bench()
+      b.mint('s1')
+      const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+      await directory.load()
+      expect(b.calls.models).toBe(1)
+      b.publishHidden({ 'deepseek-official': ['deepseek-v4-pro'] })
+      expect(directory.store.getSnapshot().groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-flash'])
+      expect(b.calls.models).toBe(1)
+    })
+
+    it('stops reacting to hidden-set changes once the session scope disposes', async () => {
+      const b = await bench()
+      const scope = b.mint('s1')
+      const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+      await directory.load()
+      await scope.fiber.dispose()
+      // The disposed directory's own store must not observe a later publish.
+      expect(() => { b.publishHidden({ 'deepseek-official': ['deepseek-v4-pro'] }) }).not.toThrow()
+      expect(directory.store.getSnapshot().groups[0]?.models.map(m => m.id)).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro'])
+    })
   })
 })

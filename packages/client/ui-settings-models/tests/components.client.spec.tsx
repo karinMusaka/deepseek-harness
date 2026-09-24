@@ -120,6 +120,16 @@ function wireNamespaces(): SettingsNamespaceView[] {
       secrets: [],
       revision: 0,
     },
+    {
+      ns: 'ui-model-selection',
+      schema: JSON.parse(JSON.stringify(Schema.object({
+        hiddenModels: Schema.dict(Schema.array(Schema.string())).default({}),
+      }).toJSON())) as unknown,
+      value: { hiddenModels: {} },
+      applies: 'live',
+      secrets: [],
+      revision: 5,
+    },
   ]
 }
 
@@ -140,6 +150,7 @@ function scriptedFace(overrides: {
   mutate?: ReturnType<typeof vi.fn>
   set?: ReturnType<typeof vi.fn>
   unset?: ReturnType<typeof vi.fn>
+  models?: ReturnType<typeof vi.fn>
 } = {}) {
   const update = overrides.update ?? vi.fn(() => Promise.resolve(ok(wireNamespaces()[2])))
   const replace = overrides.replace ?? vi.fn(() => Promise.resolve(ok(wireNamespaces()[2])))
@@ -158,7 +169,7 @@ function scriptedFace(overrides: {
           { provider: 'plain', displayName: 'plain', settingsNs: 'llm-plain', settingsPath: ['profiles', 'plain'], active: false },
         ],
       }))),
-      models: vi.fn(() => Promise.resolve(ok({ groups: [], failures: [] }))),
+      models: overrides.models ?? vi.fn(() => Promise.resolve(ok({ groups: [], failures: [] }))),
     },
     settings: {
       describe: vi.fn(() => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: wireNamespaces() }))),
@@ -1381,5 +1392,32 @@ describe('apiKeyFailure', () => {
     // heuristic leaves them alone rather than guessing at a paste error.
     expect(apiKeyFailure('"')).toBeUndefined()
     expect(apiKeyFailure('"a')).toBeUndefined()
+  })
+})
+
+describe('ModelVisibilitySection wired into ModelsSection', () => {
+  it('toggling a model reloads the whole page snapshot through the real controller', async () => {
+    const models = vi.fn(() => Promise.resolve(ok({
+      groups: [{
+        id: 'deepseek-official',
+        name: 'DeepSeek',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
+      }],
+      failures: [],
+    })))
+    const mutate = vi.fn(() => Promise.resolve(ok(wireNamespaces()[2])))
+    const { face } = scriptedFace({ models, mutate })
+    await mountFace({ face, update: vi.fn(), replace: vi.fn(), mutate, set: vi.fn(), unset: vi.fn() })
+    expect(screen.getByText('Models shown in the picker')).toBeTruthy()
+    expect(models).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByLabelText('DeepSeek-V4-Flash'))
+    await waitFor(() => { expect(mutate).toHaveBeenCalledWith({
+      ns: 'ui-model-selection',
+      ops: [{ op: 'set', path: ['hiddenModels', 'deepseek-official'], value: ['deepseek-v4-flash'] }],
+      expectedRevision: 5,
+    }) })
+    // The reload closure ModelsSection passes down calls the real controller,
+    // which re-fetches the whole page snapshot — including the catalog again.
+    await waitFor(() => { expect(models).toHaveBeenCalledTimes(2) })
   })
 })

@@ -97,6 +97,13 @@ export const en = {
   onboardingSave: 'Save and continue',
   onboardingSaving: 'Saving…',
   keyRequired: 'Enter an API key to continue.',
+  visibilityTitle: 'Models shown in the picker',
+  visibilityIntro: 'Uncheck a model to hide it from the composer model picker and the /model list. A hidden model already selected in a session keeps working.',
+  visibilityUnavailable: 'This deployment does not expose the model-picker visibility preference; every model stays shown.',
+  visibilityLoadFailed: 'Loading the model catalog failed',
+  visibilityConflict: 'Someone else changed this preference just now. Showing the latest values — please retry.',
+  showAll: 'Show all',
+  hideAll: 'Hide all',
 }
 
 /** The settings.models namespace key union. */
@@ -197,4 +204,11 @@ export const zh: { [Key in keyof typeof en]: string } = {
   onboardingSave: '保存并继续',
   onboardingSaving: '保存中…',
   keyRequired: '请输入 API 密钥后继续。',
+  visibilityTitle: '选择器中显示的模型',
+  visibilityIntro: '取消勾选可将该模型从对话框的模型选择器和 /model 列表中隐藏；会话中已选中的隐藏模型仍可正常使用。',
+  visibilityUnavailable: '当前部署未提供模型选择器可见性偏好设置，所有模型都会显示。',
+  visibilityLoadFailed: '加载模型目录失败',
+  visibilityConflict: '该设置刚刚被其他地方修改，已显示最新值，请重试。',
+  showAll: '全部显示',
+  hideAll: '全部隐藏',
 }
