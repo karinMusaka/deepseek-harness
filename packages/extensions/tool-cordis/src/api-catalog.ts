@@ -888,6 +888,60 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'memory',
+    summary: 'Durable cross-session memory.',
+    description: 'Durable cross-session memory. Host-plane singleton: opens the memory domain once, serves every session, and persists through the domain\'s JSON backend.',
+    methods: [
+      {
+        signature: 'has(id: MemoryId): boolean',
+        description: 'Whether the cache holds an entry with this id (used by the invariant).',
+        parameters: [{ name: 'id', description: 'the entry id to look up.' }],
+        returns: '`true` if an entry with this id is in the in-memory cache.',
+      },
+      {
+        signature: 'get(id: MemoryId): MemoryEntry | undefined',
+        description: 'Read one cached entry by id.',
+        parameters: [{ name: 'id', description: 'the entry id to look up.' }],
+        returns: 'the cached entry, or `undefined` if no entry has this id.',
+      },
+      {
+        signature: 'async remember(input: RememberInput): Promise<MemoryEntry>',
+        description: 'Persist one memory entry. Returns the persisted entry; the caller may then reference its id via `forget`/`touch`.',
+        parameters: [{ name: 'input', description: 'the scope, kind, content, and optional tags to store; `content` is trimmed and rejected if empty after trimming.' }],
+        returns: 'the stored entry, with a minted id and `createdAt`/`updatedAt`/ `lastAccessedAt` set to the current time and `accessCount` at `0`.',
+      },
+      {
+        signature: 'recall(query: MemoryQuery = {}): MemoryEntry[]',
+        description: 'Search stored memory. Results are ranked by accessCount descending, then `updatedAt` descending, and truncated to `query.limit` (default 12). Scope semantics: searching a project scope also surfaces user memory (personal facts travel with the user into every project); searching the `user` scope returns personal memory only; omitting scope searches all. `text` matches case-insensitively against content and tags; `kind` and `tags` narrow further, and an entry must satisfy every given filter.',
+        parameters: [{ name: 'query', description: 'the scope/kind/text/tags filters and result limit; every field is optional and an empty query matches all cached entries.' }],
+        returns: 'the matching entries in ranked order, at most `query.limit` (or 12).',
+      },
+      {
+        signature: 'async touch(id: MemoryId): Promise<void>',
+        description: 'Touch one entry\'s recency/access counters after a recall surfaces it, incrementing `accessCount` and setting `lastAccessedAt` to now. Raises that entry\'s rank in future `recall` calls. A no-op if `id` is absent.',
+        parameters: [{ name: 'id', description: 'the entry id to touch.' }],
+      },
+      {
+        signature: 'async forget(id: MemoryId): Promise<boolean>',
+        description: 'Delete one memory entry by id. Returns whether it existed.',
+        parameters: [{ name: 'id', description: 'the entry id to delete.' }],
+        returns: '`true` if an entry with this id was found and deleted, `false` if no entry had this id (nothing was deleted).',
+      },
+      {
+        signature: 'async edit(id: MemoryId, patch: { content?: string; tags?: string[] }): Promise<MemoryEntry | undefined>',
+        description: 'Update one entry\'s content and/or tags. Returns the updated entry, or `undefined` if absent.',
+        parameters: [{ name: 'id', description: 'the entry id to update.' }, { name: 'patch', description: 'fields to overwrite; an omitted field keeps its current value. `content`, if given, is trimmed and rejected if empty after trimming; `tags`, if given, replaces the entry\'s tags wholesale.' }],
+        returns: 'the updated entry with a refreshed `updatedAt`, or `undefined` if no entry has this id (no write occurs).',
+      },
+      {
+        signature: 'list(scope?: MemoryScope, kind?: MemoryKind): MemoryEntry[]',
+        description: 'List entries in a scope (optionally filtered by kind), newest first.',
+        parameters: [{ name: 'scope', description: 'restrict to this exact scope value; omission lists every scope. Unlike `recall`, a project scope does not also surface `user` entries.' }, { name: 'kind', description: 'restrict to this kind; omission lists every kind. Combines with `scope` as an intersection (an entry must match both, when given).' }],
+        returns: 'the matching entries ordered by `updatedAt` descending.',
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -1537,6 +1591,36 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Persist `input.content` to a session-scoped spill artifact.',
         parameters: [{ name: 'input', description: 'the owner, caller-supplied source fields, suggested name, and full text to save.' }],
         returns: 'the saved artifact\'s {@link SpillRef}; rejects on a storage failure.',
+      },
+    ],
+  },
+  {
+    key: 'staticCordisPackages',
+    summary: 'Static package table and host-half lifecycle.',
+    description: 'Static package table and host-half lifecycle.',
+    methods: [
+      {
+        signature: 'readonly ready: Promise<void>',
+        description: 'Settles when every configured package has been brought up or recorded as failed.',
+        parameters: [],
+      },
+      {
+        signature: '@Remote(\'list\') async list(): Promise<StaticCordisPackageRow[]>',
+        description: 'List every configured package with its host-half status. Answers only after boot has settled, so a page reconnecting during startup never reads a package that has not been evaluated yet as failed.',
+        parameters: [],
+        returns: 'one row per configured package, in configuration order.',
+      },
+      {
+        signature: '@Remote(\'clientSource\') async clientSource(id: string): Promise<StaticCordisClientSource>',
+        description: 'Serve one package\'s browser-half source to the page; answers after boot has settled.',
+        parameters: [{ name: 'id', description: 'Configured package id.' }],
+        returns: 'the source, or why none is served (unknown id, no browser half, or a failed host half).',
+      },
+      {
+        signature: '@Remote(\'invoke\') async invoke(id: string, method: string, args: JsonValue): Promise<StaticCordisInvokeResult>',
+        description: 'Route one `host.call` from a package\'s browser half to the method its host half registered.',
+        parameters: [{ name: 'id', description: 'Configured package id.' }, { name: 'method', description: 'Method name given to `harness.handle`.' }, { name: 'args', description: 'JSON argument the browser half passed (`null` when it passed none).' }],
+        returns: 'the handler\'s JSON answer, or which routing step refused.',
       },
     ],
   },
@@ -2701,11 +2785,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AssembledContext',
-    declaration: 'export interface AssembledContext {\n    name: string;\n    text: string;\n}',
+    declaration: 'export interface AssembledContext {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n}',
   },
   {
     name: 'AssembledSection',
-    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n}',
+    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n}',
   },
   {
     name: 'AssistantMessage',
@@ -3097,7 +3181,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\' | \'vision-classify\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -3368,6 +3452,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
   {
+    name: 'MemoryEntry',
+    declaration: 'export type MemoryEntry = z.infer<typeof memoryEntry>;',
+  },
+  {
+    name: 'MemoryKind',
+    declaration: 'export type MemoryKind = \'fact\' | \'preference\' | \'decision\' | \'note\';',
+  },
+  {
+    name: 'MemoryQuery',
+    declaration: 'export interface MemoryQuery {\n    text?: string;\n    scope?: MemoryScope;\n    kind?: MemoryKind;\n    tags?: string[];\n    limit?: number;\n}',
+  },
+  {
+    name: 'MemoryScope',
+    declaration: 'export type MemoryScope = \'user\' | `project:${string}`;',
+  },
+  {
     name: 'Message',
     declaration: 'export interface Message {\n    readonly id: MessageId;\n    readonly role: \'system\' | \'user\' | \'assistant\';\n    readonly content: ContentBlock[];\n    readonly source: MessageSource;\n}',
   },
@@ -3545,11 +3645,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PromptContext',
-    declaration: 'export interface PromptContext {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n}',
+    declaration: 'export interface PromptContext {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n}',
   },
   {
     name: 'PromptSection',
-    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly complete?: boolean;\n}',
+    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly complete?: boolean;\n    readonly interpolate?: boolean;\n}',
   },
   {
     name: 'ProviderRequestId',
@@ -3582,6 +3682,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RedactedSecret',
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
+  },
+  {
+    name: 'RememberInput',
+    declaration: 'export interface RememberInput {\n    scope: MemoryScope;\n    kind: MemoryKind;\n    content: string;\n    tags?: string[];\n}',
   },
   {
     name: 'ReplayEnvelope',
@@ -4086,6 +4190,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SpillSource',
     declaration: 'export interface SpillSource {\n    toolName: string;\n    callId: CallId;\n    label: string;\n}',
+  },
+  {
+    name: 'StaticCordisClientSource',
+    declaration: 'export type StaticCordisClientSource = {\n    ok: true;\n    id: string;\n    name: string;\n    code: string;\n} | {\n    ok: false;\n    message: string;\n};',
+  },
+  {
+    name: 'StaticCordisHostState',
+    declaration: 'export type StaticCordisHostState = \'running\' | \'failed\' | \'none\';',
+  },
+  {
+    name: 'StaticCordisInvokeResult',
+    declaration: 'export type StaticCordisInvokeResult = {\n    ok: true;\n    value: JsonValue;\n} | {\n    ok: false;\n    code: \'package-missing\' | \'host-not-running\' | \'method-not-found\' | \'handler-error\';\n    message: string;\n    stack?: string;\n};',
+  },
+  {
+    name: 'StaticCordisPackageRow',
+    declaration: 'export interface StaticCordisPackageRow {\n    id: string;\n    name: string;\n    hasClientHalf: boolean;\n    hostState: StaticCordisHostState;\n    error?: string;\n}',
   },
   {
     name: 'StorageBackend',

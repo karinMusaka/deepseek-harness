@@ -16,6 +16,7 @@ npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通�
 | [`goal/`](goal/README.md) | 同会话 goal 的持久化与生命周期 | 产品：稳定 API |
 | [`schedule/`](schedule/README.md) | 仅限会话内的定时后续操作 | 产品：稳定 API |
 | [`feedback/`](feedback/README.md) | 人类反馈 | 产品：稳定 API |
+| [`memory/`](memory/README.md) | 持久的跨会话记忆：host-plane 服务加面向模型的工具 | 产品：稳定 API |
 | [`identity/`](identity/README.md) | 共享匿名身份 | 产品：稳定 API |
 | [`llm/`](llm/README.md) | LLM（大语言模型）能力系列：抽象服务 + 提供方适配器 | 产品：稳定 API |
 | [`e2b/`](e2b/README.md) | E2B 提供方 | POC |

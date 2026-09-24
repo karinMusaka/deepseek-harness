@@ -32,6 +32,7 @@
 | `@deepseek-ai/dsh-tool-goal` | `create_goal`、`get_goal`、`update_goal` | `ctx.tools`、`ctx.agents`、`ctx.goals`、`ctx.systemPrompt`、`a calling Agent in an authorized open turn` | `tool/call`、`goal/change for mutations`、`tool/result` | - | create、edit、pause 和 resume 要求直接来自人类的根权限；complete 和 blocked 也接受确切的当前 Goal Round。blocked 的默认下限是 3 个获准的 Round。 |
 | `@deepseek-ai/dsh-schedule` | `schedule_create`、`schedule_delete`、`schedule_list` | `ctx.tools`、`ctx.sessions`、Session 持久化、未来创建的 live 根 Agent | `tool/call`、`schedule/change create or delete`、`tool/result` | - | 仅在选择启用的 Schedule 插件加载后创建的 live 根 Agent scope 内注册。版本 1 接受 after_seconds、显式绝对 at 和有界固定速率 every_seconds，并披露 session-local 交付；管理读取与变更必须通过共享的 Session 持久化 barrier。 |
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`、`ctx.lsp`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，因此其模型可见 schema 在更换提供方时保持稳定。运行时要求已注册提供方，例如 `@deepseek-ai/dsh-lsp-stdio`；如果没有提供方，查询会返回结构化 `LSP_UNAVAILABLE` 错误，而不会改变 schema。 |
+| `@deepseek-ai/dsh-tool-memory` | `memory_edit`、`memory_forget`、`memory_list`、`memory_recall`、`memory_remember` | `ctx.tools`、`ctx.memory`、`ctx.systemPrompt`、`a calling Agent for project scope` | `tool/call`、`memory domain entries for mutations`、`tool/result` | - | 记忆是跨会话的：条目持久化在 `memory` 存储 domain 中，由进程内每个会话共享。工具只读写 `user` 条目，以及调用会话 cwd 对应的 `project:<cwd>` 条目。 |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`、`ctx.workflowEngine`、`ctx.subagents`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents every fresh round)` | `tool/call`、`tool/result`、`workflow and child session events during execution` | - | 固定的前台工作流会在每个 Round 启动一个全新的结构化子级；模型只能选择不可变目标和可选的 Round 上限。 |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.tools`、`ctx.agents`、`ctx.skills` | `tool/call`、`tool/result`、`user/message replacement catalogs via agent.inject()` | - | - |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`、`session_event_search`、`session_event_trace`、`session_search`、`session_trace` | `ctx.tools`、`ctx.systemPrompt`、`ctx.sessionQuery`、`a calling Agent for workspace authority` | `tool/call`、`tool/result` | - | 这 5 个只读工具会隐藏提供方游标，并根据不可变的调用 agent 会话为每个结果授权。该包需要选择启用；需要强制截止时间或限制行内输出的组合还会挂载通用超时或 spill 策略。 |
@@ -1208,6 +1209,176 @@ create、edit、pause 和 resume 要求直接来自人类的根权限；complete
 来源：[`packages/lsp/tool-lsp/src/index.ts`](../packages/lsp/tool-lsp/src/index.ts)
 
 lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，因此其模型可见 schema 在更换提供方时保持稳定。运行时要求已注册提供方，例如 `@deepseek-ai/dsh-lsp-stdio`；如果没有提供方，查询会返回结构化 `LSP_UNAVAILABLE` 错误，而不会改变 schema。
+
+<a id="deepseek-aidsh-tool-memory"></a>
+
+## `@deepseek-ai/dsh-tool-memory`
+
+### `memory_edit`
+
+替换一条已存记忆的内容和／或标签。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The memory id to update."
+    },
+    "content": {
+      "type": "string",
+      "description": "New memory text."
+    },
+    "tags": {
+      "type": "array",
+      "description": "Replacement tags.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "id"
+  ]
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+### `memory_forget`
+
+按 id 删除一条已存记忆。使用 memory_recall 或 memory_list 返回的 id。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The memory id to delete."
+    }
+  },
+  "required": [
+    "id"
+  ]
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+### `memory_list`
+
+按最新优先的顺序列出当前作用域内的已存记忆。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "description": "Only list a kind.",
+      "enum": [
+        "fact",
+        "preference",
+        "decision",
+        "note"
+      ]
+    }
+  }
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+### `memory_recall`
+
+搜索已存记忆（个人记忆与当前项目）。当你怀疑用户或项目存在与当前任务相关的、已记住的偏好、事实或决策时使用此工具。对 content 与 tags 做自由文本搜索，可选按 scope 与 kind 收窄。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string",
+      "description": "Free-form search text; empty returns the most-used memories."
+    },
+    "scope": {
+      "type": "string",
+      "description": "Restrict a scope; omitted searches both.",
+      "enum": [
+        "user",
+        "project"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "description": "Restrict a kind.",
+      "enum": [
+        "fact",
+        "preference",
+        "decision",
+        "note"
+      ]
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max results (default 12)."
+    }
+  }
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+### `memory_remember`
+
+存储一条关于用户或当前项目的持久跨会话记忆。当用户陈述了一项你应当记住并在后续会话中遵守的偏好、事实或决策时使用此工具。kind 为 "fact"（既有事实）、"preference"（持久选择）、"decision"（已做出的决策 + 理由）或 "note"（一般笔记）。scope 默认为当前项目。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "content": {
+      "type": "string",
+      "description": "The memory text, written as a standalone statement another session can act on."
+    },
+    "kind": {
+      "type": "string",
+      "description": "fact | preference | decision | note.",
+      "enum": [
+        "fact",
+        "preference",
+        "decision",
+        "note"
+      ]
+    },
+    "scope": {
+      "type": "string",
+      "description": "Defaults to the current working directory project; \"user\" stores personal memory.",
+      "enum": [
+        "user",
+        "project"
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "description": "Optional search labels.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "content",
+    "kind"
+  ]
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
+
+记忆是跨会话的：条目持久化在 `memory` 存储 domain 中，由进程内每个会话共享。工具只读写 `user` 条目，以及调用会话 cwd 对应的 `project:<cwd>` 条目。
 
 <a id="deepseek-aidsh-tool-ralph"></a>
 

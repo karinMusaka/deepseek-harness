@@ -254,7 +254,41 @@ inspectPackage( agent: Agent, pluginId: CordisDynamicPluginId, packageId: Cordis
 
 Types: [Agent](core.md)
 
-Source: [`packages/extensions/cordis-host-runner/src/index.ts:124`](../../packages/extensions/cordis-host-runner/src/index.ts)
+Source: [`packages/extensions/cordis-host-runner/src/index.ts:129`](../../packages/extensions/cordis-host-runner/src/index.ts)
+
+<a id="ctxstaticcordispackages--staticcordispackagesservice"></a>
+
+### `ctx.staticCordisPackages` — `StaticCordisPackagesService`
+
+Static package table and host-half lifecycle.
+
+```ts cordis-catalog
+/**
+ * List every configured package with its host-half status. Answers only
+ * after boot has settled, so a page reconnecting during startup never reads
+ * a package that has not been evaluated yet as failed.
+ * @returns one row per configured package, in configuration order.
+ */
+@Remote('list') async list(): Promise<StaticCordisPackageRow[]>
+
+/**
+ * Serve one package's browser-half source to the page; answers after boot has settled.
+ * @param id - Configured package id.
+ * @returns the source, or why none is served (unknown id, no browser half, or a failed host half).
+ */
+@Remote('clientSource') async clientSource(id: string): Promise<StaticCordisClientSource>
+
+/**
+ * Route one `host.call` from a package's browser half to the method its host half registered.
+ * @param id - Configured package id.
+ * @param method - Method name given to `harness.handle`.
+ * @param args - JSON argument the browser half passed (`null` when it passed none).
+ * @returns the handler's JSON answer, or which routing step refused.
+ */
+@Remote('invoke') async invoke(id: string, method: string, args: JsonValue): Promise<StaticCordisInvokeResult>
+```
+
+Source: [`packages/extensions/cordis-static-packages/src/index.ts:95`](../../packages/extensions/cordis-static-packages/src/index.ts)
 
 <a id="cordis-events"></a>
 

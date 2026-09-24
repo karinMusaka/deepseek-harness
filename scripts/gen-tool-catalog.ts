@@ -17,6 +17,10 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import GoalService from '@deepseek-ai/dsh-goal'
+import MemoryService from '@deepseek-ai/dsh-memory'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import * as StorageSqlite from '@deepseek-ai/dsh-storage-sqlite'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type Config as ToolsConfig } from '@deepseek-ai/dsh-tools'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
@@ -53,6 +57,7 @@ import * as ToolStrReplaceEditor from '@deepseek-ai/dsh-tool-str-replace-editor'
 import TerminalSessionService from '@deepseek-ai/dsh-terminal'
 import * as ToolPty from '@deepseek-ai/dsh-tool-terminal'
 import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
+import * as ToolMemory from '@deepseek-ai/dsh-tool-memory'
 import * as ToolSchedule from '@deepseek-ai/dsh-schedule'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as ToolLsp from '@deepseek-ai/dsh-tool-lsp'
@@ -406,6 +411,23 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-memory',
+    dir: 'tool-memory',
+    source: 'packages/memory/tool-memory/src/index.ts',
+    requires: ['ctx.tools', 'ctx.memory', 'ctx.systemPrompt', 'a calling Agent for project scope'],
+    writes: ['tool/call', 'memory domain entries for mutations', 'tool/result'],
+    async mount(ctx) {
+      // An in-memory SQLite medium keeps the catalog boot free of disk writes.
+      await ctx.plugin(Storage)
+      await ctx.plugin(StorageSqlite, { path: ':memory:' })
+      await ctx.plugin(StorageDomain, { backend: 'sqlite' })
+      await ctx.plugin(MemoryService)
+      await ctx.plugin(ToolMemory, { contextLimit: 10, maxRecallLimit: 50 })
+    },
+    note:
+      'Memory is cross-session: entries persist in the `memory` storage domain and are shared by every session in the process. Tools read and modify only `user` entries and the calling session cwd\'s `project:<cwd>` entries.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-ralph',

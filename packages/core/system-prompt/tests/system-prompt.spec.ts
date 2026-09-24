@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSections, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
@@ -577,6 +577,60 @@ describe('SystemPrompt', () => {
         variables: { model: 'literal {{sneaky}} inside' },
       })
       expect(text).toBe('v = literal {{sneaky}} inside!')
+    })
+  })
+
+  describe('interpolate: false (data sections and contexts)', () => {
+    it('renders an interpolate: false section verbatim while a sibling section still interpolates', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      ctx.systemPrompt.variable('model', () => 'deepseek-v4')
+      ctx.systemPrompt.section({ name: 'data', order: 10, text: 'stored: {{name}} and {{handle}}', interpolate: false })
+      ctx.systemPrompt.section({ name: 'template', order: 20, text: 'running {{model}}' })
+
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(contributed(assembly)).toEqual([
+        { name: 'data', text: 'stored: {{name}} and {{handle}}', interpolate: false },
+        { name: 'template', text: 'running {{model}}' },
+      ])
+      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nstored: {{name}} and {{handle}}\n\nrunning deepseek-v4`)
+    })
+
+    it('keeps a malformed group verbatim in an interpolate: false section', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      ctx.systemPrompt.section({ name: 'data', order: 10, text: 'weird {{ not a name }} here', interpolate: false })
+
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nweird {{ not a name }} here`)
+    })
+
+    it('renders an interpolate: false context verbatim while a sibling context still interpolates', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      ctx.systemPrompt.variable('model', () => 'deepseek-v4')
+      ctx.systemPrompt.context({ name: 'data', order: 10, text: 'stored: {{name}}', interpolate: false })
+      ctx.systemPrompt.context({ name: 'template', order: 20, text: 'running {{model}}' })
+
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(assembly.contexts).toEqual([
+        { name: 'data', text: 'stored: {{name}}', interpolate: false },
+        { name: 'template', text: 'running {{model}}' },
+      ])
+      expect(renderContextSections(assembly)).toEqual([
+        { name: 'data', text: 'stored: {{name}}' },
+        { name: 'template', text: 'running deepseek-v4' },
+      ])
+      expect(renderContextSnapshot(assembly)).toBe('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nstored: {{name}}\n\nrunning deepseek-v4')
+    })
+
+    it('keeps a malformed group verbatim in an interpolate: false context', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      ctx.systemPrompt.context({ name: 'data', order: 0, text: 'weird {{ not a name }} here', interpolate: false })
+
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(renderContextSections(assembly)).toEqual([{ name: 'data', text: 'weird {{ not a name }} here' }])
     })
   })
 })

@@ -39,7 +39,7 @@ interface ToolProviderResult {
 
 ## 提示词段落
 
-`PromptSection` 是一份只读的同进程注册约定。其文本可以是静态的，也可以从当前组装上下文动态解析。协作式组装完成后，一个有效的 `complete` 段会成为唯一的提示词段落。
+`PromptSection` 是一份只读的同进程注册约定。其文本可以是静态的，也可以从当前组装上下文动态解析。协作式组装完成后，一个有效的 `complete` 段会成为唯一的提示词段落。`interpolate: false` 会把 `text` 标记为数据而非模板；`PromptContext` 上也有同名字段。
 
 ```ts type-equiv
 /** One contributed section of the system prompt (registry input). */
@@ -65,6 +65,12 @@ interface PromptSection {
    * More than one effective complete section makes assembly fail.
    */
   readonly complete?: boolean
+  /**
+   * When `false`, the text is data: it renders verbatim and any `{{…}}` group
+   * in it is literal prose, never interpolated. Omitted means the text is a
+   * template subject to strict `{{variable}}` interpolation.
+   */
+  readonly interpolate?: boolean
 }
 ```
 
@@ -81,6 +87,12 @@ interface PromptContext {
   readonly order: number
   /** Static text or a provider evaluated for each assembly. Empty text contributes nothing. */
   readonly text: string | ((context: AssembleContext) => string)
+  /**
+   * When `false`, the text is data: it renders verbatim and any `{{…}}` group
+   * in it is literal prose, never interpolated. Omitted means the text is a
+   * template subject to strict `{{variable}}` interpolation.
+   */
+  readonly interpolate?: boolean
 }
 ```
 
@@ -156,7 +168,7 @@ variable(name: string, provider: (context: AssembleContext) => string | undefine
 async assemble(context: AssembleContext = {}): Promise<PromptAssembly>
 ```
 
-Source: [`packages/core/system-prompt/src/index.ts:338`](../../packages/core/system-prompt/src/index.ts)
+Source: [`packages/core/system-prompt/src/index.ts:355`](../../packages/core/system-prompt/src/index.ts)
 
 <a id="system-prompt-events"></a>
 

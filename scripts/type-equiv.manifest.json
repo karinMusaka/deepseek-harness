@@ -167,6 +167,26 @@
       "source": "packages/core/scope/src/store.ts"
     },
     {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryScope",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryKind",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryQuery",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "RememberInput",
+      "source": "packages/memory/memory/src/index.ts"
+    },
+    {
       "doc": "docs/subsystems/goal.md",
       "symbol": "GoalRef",
       "source": "packages/goal/goal/src/types.ts"

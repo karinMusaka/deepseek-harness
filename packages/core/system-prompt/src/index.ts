@@ -72,6 +72,12 @@ export interface PromptSection {
    * More than one effective complete section makes assembly fail.
    */
   readonly complete?: boolean
+  /**
+   * When `false`, the text is data: it renders verbatim and any `{{…}}` group
+   * in it is literal prose, never interpolated. Omitted means the text is a
+   * template subject to strict `{{variable}}` interpolation.
+   */
+  readonly interpolate?: boolean
 }
 
 /** Dynamic model context materialized as a durable user-role snapshot. */
@@ -82,6 +88,12 @@ export interface PromptContext {
   readonly order: number
   /** Static text or a provider evaluated for each assembly. Empty text contributes nothing. */
   readonly text: string | ((context: AssembleContext) => string)
+  /**
+   * When `false`, the text is data: it renders verbatim and any `{{…}}` group
+   * in it is literal prose, never interpolated. Omitted means the text is a
+   * template subject to strict `{{variable}}` interpolation.
+   */
+  readonly interpolate?: boolean
 }
 
 /** One section of an assembly: {@link PromptSection} with its text resolved. */
@@ -90,6 +102,8 @@ export interface AssembledSection {
   name: string
   /** The resolved (but not yet interpolated) section text. */
   text: string
+  /** Carried from {@link PromptSection.interpolate}; see there for the contract. */
+  interpolate?: boolean
 }
 
 /** One resolved dynamic context contribution. */
@@ -98,6 +112,8 @@ export interface AssembledContext {
   name: string
   /** The resolved text before variable interpolation. */
   text: string
+  /** Carried from {@link PromptContext.interpolate}; see there for the contract. */
+  interpolate?: boolean
 }
 
 /** Tool schemas visible in one assembly and their pre-restriction name set. */
@@ -261,6 +277,7 @@ function interpolate(
   kind: 'section' | 'context',
 ): string {
   const text = input.text
+  if (input.interpolate === false) return text
   let result = ''
   let last = 0
   for (let open = text.indexOf('{{'); open >= 0; open = text.indexOf('{{', last)) {
@@ -509,9 +526,10 @@ export class SystemPrompt extends Service {
     let completeSection: AssembledSection | undefined
     const sections = sectionDefinitions
       .map((section) => {
-        const assembled = {
+        const assembled: AssembledSection = {
           name: section.name,
           text: typeof section.text === 'function' ? section.text(context) : section.text,
+          ...(section.interpolate === false ? { interpolate: false } : {}),
         }
         if (section.complete === true) completeSection = { ...assembled }
         return assembled
@@ -522,9 +540,10 @@ export class SystemPrompt extends Service {
         ? []
         : [...contextByName.values()]
           .sort((a, b) => a.order - b.order)
-          .map(entry => ({
+          .map((entry): AssembledContext => ({
             name: entry.name,
             text: typeof entry.text === 'function' ? entry.text(context) : entry.text,
+            ...(entry.interpolate === false ? { interpolate: false } : {}),
           })),
       tools: orderTools(collected, this.toolOrder, knownNames),
       variables,

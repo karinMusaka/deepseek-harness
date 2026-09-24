@@ -222,6 +222,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Owns local per-assistant-message feedback, lifecycle and target validation, per-item compare-and-set, and the Host unary Remote contract without entering Session history or telemetry.',
   },
   {
+    key: 'memory',
+    pkg: 'memory',
+    title: 'Durable cross-session memory',
+    mode: 'core',
+    consumers: ['tool-memory'],
+    note: 'Owns one flat entries table over the storage domain, shared by every session in the process; the sole consumer turns remember/recall/list/forget/edit into model-facing tools and one runtime-context snapshot.',
+  },
+  {
     key: 'workspaceRegistry',
     pkg: 'workspace',
     title: 'Workspace entity registry',
@@ -554,6 +562,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['tool-cordis'],
     note: 'Owns the in-memory definition registry, the vm sandbox for host halves, and the request-run round trip; browser pages reach the same service over the wire through its remote namespace.',
+  },
+  {
+    key: 'staticCordisPackages',
+    pkg: 'cordis-static-packages',
+    title: 'Static dual-half package loader',
+    mode: 'core',
+    note: 'Loads boot-time-configured dual-half packages from disk through the same host-runner sandbox and registration guard as a `cordis_define`d package, and serves each browser half its source and `host.call` routing over its own Remote namespace.',
   },
   {
     key: 'cordisInspect',

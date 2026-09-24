@@ -66,6 +66,13 @@
       config:
         maxNoteBytes: 8192
 
+    # Cross-session memory: one host-plane service over the `memory` storage
+    # domain, shared by every session in this process. The model-facing
+    # `@deepseek-ai/dsh-tool-memory` Consumer is opt-in per agent: an agent
+    # preset mounts it, and this bundle's dependency makes that row resolvable.
+    - id: memory
+      name: '@deepseek-ai/dsh-memory'
+
     # Browser Session export: `/export` command plus the shared download dialog.
     - id: session-log-download
       name: '@deepseek-ai/dsh-session-log-export'
