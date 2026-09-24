@@ -11,6 +11,7 @@ LLM（大语言模型）seam 及其提供方适配器。`llm` 包同时承担 Se
 | [`llm-retry/`](llm-retry/README.md) | 提供方作用域的重试策略 | 监听 `agent/request-error` |
 | [`llm-deepseek/`](llm-deepseek/README.md) | 直接 DeepSeek 适配器 | 注册到 `ctx.llm` |
 | [`llm-ollama/`](llm-ollama/README.md) | Ollama NDJSON 适配器 | 注册到 `ctx.llm` |
+| [`llm-antigravity/`](llm-antigravity/README.md) | Antigravity CLI（agy）适配器 | 注册到 `ctx.llm` |
 | [`llm-pi-ai/`](llm-pi-ai/README.md) | 多提供方 pi-ai 适配器 | 注册到 `ctx.llm` |
 | [`tool-classify-image/`](tool-classify-image/README.md) | 将 `classify_image` 转接到辅助视觉路由 | 消费 `ctx.llm` |
 

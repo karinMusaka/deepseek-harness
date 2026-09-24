@@ -202,6 +202,7 @@
     { "path": "./packages/code-runtime/code-runtime" },
     { "path": "./packages/code-runtime/code-runtime-worker-thread" },
     { "path": "./packages/llm/llm-deepseek" },
+    { "path": "./packages/llm/llm-antigravity" },
     { "path": "./packages/llm/llm-ollama" },
     { "path": "./packages/llm/tool-classify-image" },
     { "path": "./packages/llm/llm-pi-ai" },

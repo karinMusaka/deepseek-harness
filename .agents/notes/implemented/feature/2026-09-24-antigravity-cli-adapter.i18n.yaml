@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-24-antigravity-cli-adapter.md
+2026-09-24-antigravity-cli-adapter.md: 863d6c2800900f8a958fa08a7783bf87fac83f1a
+2026-09-24-antigravity-cli-adapter.zh.md: 4d9c6283c3cf80ed69001f4088813050ab34ff5e

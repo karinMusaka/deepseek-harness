@@ -868,6 +868,48 @@ export interface Config {
 
 来源：[`packages/jobs/jobs-local/src/index.ts:31`](../packages/jobs/jobs-local/src/index.ts)
 
+<a id="deepseek-aidsh-llm-antigravity"></a>
+
+## `@deepseek-ai/dsh-llm-antigravity`
+
+需要：`llm`
+
+```ts config-catalog
+/**
+ * Plugin config, fully defaulted by the schema below: every field always
+ * carries a value by the time `apply` reads it, so no field is optional here
+ * and `resolveAdapterOptions` validates rather than defaults.
+ */
+export interface Config {
+  /** Path or bare command name resolved through `PATH` for the agy executable. */
+  binaryPath: string
+  /** `--print-timeout` value in whole seconds passed to every agy invocation. */
+  printTimeoutSeconds: number
+  /** Model catalog; empty means "discover via `agy models` at first use". */
+  models: AntigravityCatalogModel[]
+  /** Context-window fallback for a model without a configured or discovered capacity. */
+  defaultContextWindow: number
+  /** Output-token-cap fallback for a model without a configured capacity. */
+  defaultMaxTokens: number
+}
+
+/** One model entry an operator declares in `Config.models`. */
+export interface AntigravityCatalogModel {
+  /** Model id accepted by `agy --model` (for example `gemini-3.8-flash-high`). */
+  id: string
+  /** Human-readable display name; defaults to {@link id}. */
+  name?: string
+  /** Optional selector detail distinguishing similar entries. */
+  description?: string
+  /** Known combined request/response context capacity, when disclosed. */
+  contextWindow?: number
+  /** Known per-request output cap, when disclosed. */
+  maxTokens?: number
+}
+```
+
+来源：[`packages/llm/llm-antigravity/src/index.ts:32`](../packages/llm/llm-antigravity/src/index.ts)
+
 <a id="deepseek-aidsh-llm-deepseek"></a>
 
 ## `@deepseek-ai/dsh-llm-deepseek`
